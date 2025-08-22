@@ -25,7 +25,7 @@
 pip install -r requirements.txt
 ```
 ---
-## ⚙️ 환경 변수 설정
+## ⚙️ Environment Variables
 프로젝트 실행 전에 API Key 및 DB 접속 정보를 .env 파일에 저장해야 합니다.
 프로젝트 내부의 sample.env 파일에 해당하는 key 값을 채우고 파일명을 .env로 변경합니다.
 
