@@ -85,7 +85,7 @@ python run_graphdb.py --date_st 20250724 --date_fn 20250725
 - utils.py: 실행 시간 측정 유틸리티, GraphDB 생성 관련 공용 함수
 ---
 ## 📜 License
-This project is licensed under the MIT License.
+- This project is licensed under the MIT License.
 ---
 ## 👨‍💻 Developer
 ```
