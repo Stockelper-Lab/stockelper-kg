@@ -27,15 +27,34 @@ pip install -r requirements.txt
 ---
 ## 환경 변수 설정
 프로젝트 실행 전에 API Key 및 DB 접속 정보를 .env 파일에 저장해야 합니다.
+프로젝트 내부의 sample.env 파일에 해당하는 key 값을 채우고 파일명을 .env로 변경합니다.
 
 ```
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your_password
+# DART API 키 정보
+OPEN_DART_API_KEY = ''
 
-KIS_API_KEY=your_kis_api_key
-DART_API_KEY=your_dart_api_key
-KRX_API_KEY=your_krx_api_key
+# 한국투자증권 API 키 정보 (실전투자)
+KIS_APP_KEY=''
+KIS_APP_SECRET=''
+KIS_ACCESS_TOKEN=''
+KIS_ACCESS_NUMBER = ''
+
+# 계좌 정보 (선택적)
+KIS_ACCOUNT_NUMBER=''
+KIS_ACCOUNT_CODE=''
+
+# 모의투자 여부 (true/false)
+KIS_VIRTUAL=true
+
+# Neo4j
+NEO4J_URI = ''
+NEO4J_USER = ''
+NEO4J_PASSWORD = ''
+
+# MongoDB
+DB_URI = ''
+DB_NAME = ''
+DB_COLLECTION_NAME = ''
 ```
 ---
 ## 📌 Usage
@@ -68,4 +87,7 @@ python run_graphdb.py --date_st 20250724 --date_fn 20250725
 ## 📜 License
 This project is licensed under the MIT License.
 ---
-## 
+## 👨‍💻 Developer
+```
+Cheonsol Lee
+```
