@@ -1,0 +1,29 @@
+[project]
+name = "stock-knowledge-graph"
+version = "0.1.0"
+description = "Korean stock domain knowledge graph builder for Neo4j"
+authors = [{ name = "Youngsang Jeong" }]
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+
+dependencies = [
+  "pandas>=2.0,<3.0",
+  "numpy>=1.24,<3.0",
+  "requests>=2.31,<3",
+  "python-dotenv>=1.0,<2",
+  "neo4j>=5.11,<6",
+  "OpenDartReader>=0.2.3,<0.3",
+  "tqdm>=4.65,<5",
+  "pymongo>=4.3,<5",
+  "finance-datareader>=0.9.90,<1.0",
+]
+
+[project.scripts]
+run-graphdb = "run_graphdb:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
