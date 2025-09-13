@@ -95,9 +95,16 @@ class StockGraph:
         self.competitor_df = _get_competitor_df(self.DB_URI, self.DB_NAME, self.DB_COLLECTION_NAME)
 
         stock_code_li = self.company_df_krx.stock_code
-        missing_stock_codes = set(stock_code_li) - set(self.competitor_df.stock_code)
+        
+        # competitor_df가 비어있거나 stock_code 컬럼이 없는 경우 처리
+        if self.competitor_df.empty or 'stock_code' not in self.competitor_df.columns:
+            existing_stock_codes = set()
+        else:
+            existing_stock_codes = set(self.competitor_df.stock_code)
+            
+        missing_stock_codes = set(stock_code_li) - existing_stock_codes
         for stock_code in missing_stock_codes:
-            _competitor = pd.DataFrame({'stock_code': [stock_code]})
+            _competitor = pd.DataFrame({'stock_code': [stock_code], 'compete_code_li': [[]]})
             self.competitor_df = pd.concat([self.competitor_df, _competitor], ignore_index=True)
 
     # 재무제표 정보
@@ -285,30 +292,44 @@ def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET,
 # MongoDB 연동(경쟁사)
 def _get_competitor_df(DB_URI, DB_NAME, DB_COLLECTION_NAME):
     try:
-        client = MongoClient(DB_URI) # MongoDB 클라이언트 연결
-        db = client[DB_NAME] # 데이터베이스 선택
-        collection = db[DB_COLLECTION_NAME] # 컬렉션 선택
-        documents = collection.find() # 데이터 조회
-        data = list(documents) # MongoDB 데이터를 DataFrame으로 변환
+        # MongoDB 연결 시도 (타임아웃 설정)
+        client = MongoClient(DB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+        db = client[DB_NAME]
+        collection = db[DB_COLLECTION_NAME]
+        
+        # 연결 테스트
+        client.admin.command('ping')
+        
+        documents = collection.find()
+        data = list(documents)
         if data:
             competitor_df = pd.DataFrame(data)
             logger.info("Convert MongoDB to competitor_df")
             competitor_df = competitor_df.rename(columns = {'_id':'stock_code'})
         
             # 'competitors' 컬럼의 각 리스트에서 'code'만 추출하여 새 컬럼 'competitor_li'에 저장
-            competitor_df['compete_code_li'] = competitor_df['competitors'].apply(
-                lambda comp_list: [comp['code'] for comp in comp_list if 'code' in comp]
-            )
-            competitor_df = competitor_df[['stock_code','compete_code_li']]
+            if 'competitors' in competitor_df.columns:
+                competitor_df['compete_code_li'] = competitor_df['competitors'].apply(
+                    lambda comp_list: [comp['code'] for comp in comp_list if 'code' in comp] if isinstance(comp_list, list) else []
+                )
+                competitor_df = competitor_df[['stock_code','compete_code_li']]
+            else:
+                # competitors 컬럼이 없으면 기본 구조만 생성
+                competitor_df = competitor_df[['stock_code']]
+                competitor_df['compete_code_li'] = [[] for _ in range(len(competitor_df))]
             return competitor_df
         else:
             logger.info("No data in collection")
-            return pd.DataFrame()  # 빈 DataFrame 반환
+            return pd.DataFrame(columns=['stock_code', 'compete_code_li'])  # 빈 DataFrame with columns
     except Exception as e:
         logger.error(f"Failed to DB connection: {e}")
-        return pd.DataFrame()  # 오류 발생 시 빈 DataFrame 반환
+        logger.info("Using empty competitor DataFrame due to connection failure")
+        return pd.DataFrame(columns=['stock_code', 'compete_code_li'])  # 빈 DataFrame with columns
     finally:
-        client.close()
+        try:
+            client.close()
+        except:
+            pass
 
 # 재무제표 정보 추출
 def _get_fs_df(stock_code, date, OPEN_DART_API_KEY):
