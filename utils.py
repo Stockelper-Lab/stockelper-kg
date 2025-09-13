@@ -1,18 +1,7 @@
-import re
-import FinanceDataReader as fdr
-import pandas as pd
-import OpenDartReader
 import logging
-from pymongo import MongoClient
-from pymilvus import MilvusClient
-import os
-from dotenv import load_dotenv
 from stock_knowledge_graph import _create_cypher_query_stock, _create_cypher_query_competitor
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
-import json
-import ast
-import requests
 import warnings
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -68,19 +57,18 @@ def _get_competitor_info(stock_code, graph_df):
 # 그래프 DB 생성
 def create_graph_db(graph, graph_df, stock_code, date_li):
     try:
-        filter_df = graph_df[graph_df['stock_code']==stock_code]
+        filter_df = graph_df[graph_df['stock_code'] == stock_code]
         company_dict = filter_df.iloc[0].to_dict()
-        
-        # 1. 주식 데이터 추가
-        for i, date in enumerate(date_li):
+
+        queries = []
+        # 1. 주식 데이터 추가 (날짜별)
+        for date in date_li:
             try:
-                stock_price_dict = filter_df[filter_df['date']==date].iloc[0].to_dict()  # 주식 기록 있는 날짜만 추출
-                cypher_stock_query = _create_cypher_query_stock(
-                    date, company_dict, stock_price_dict
-                )
-                graph.create_schema(cypher_stock_query)
+                stock_price_dict = filter_df[filter_df['date'] == date].iloc[0].to_dict()
+                cypher_stock_query = _create_cypher_query_stock(date, company_dict, stock_price_dict)
+                queries.append(cypher_stock_query)
             except Exception as e:
-                logging.error(f"Error: {company_dict['stock_nm']} 추가 불가: {e}")
+                logging.error(f"Error: {company_dict['stock_nm']}({stock_code}) 날짜 {date} 추가 불가: {e}")
                 continue
 
         # 2. 경쟁사 데이터 추가
@@ -88,12 +76,13 @@ def create_graph_db(graph, graph_df, stock_code, date_li):
             src_company_dict, dst_company_dict_li = _get_competitor_info(stock_code, graph_df)
             for dst_company_dict in dst_company_dict_li:
                 cypher_competitor_query = _create_cypher_query_competitor(src_company_dict, dst_company_dict)
-                graph.create_schema(cypher_competitor_query)
+                queries.append(cypher_competitor_query)
         except Exception as e:
             logging.error(f"Error: 경쟁사 데이터 추가 불가: {e}")
 
+        # 하나의 트랜잭션으로 실행 (성능 개선)
+        if queries:
+            graph.run_queries(queries)
+
     except Exception as e:
         logging.error(f"Error: 주식 데이터 생성 불가: {e}")
-    
-    finally:
-        graph.close()      

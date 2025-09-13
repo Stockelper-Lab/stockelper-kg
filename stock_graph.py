@@ -1,10 +1,8 @@
 import re
-import FinanceDataReader as fdr
 import pandas as pd
 import OpenDartReader
 import logging
 from pymongo import MongoClient
-from pymilvus import MilvusClient
 import os
 from dotenv import load_dotenv
 from utils import measure_time
@@ -44,6 +42,12 @@ class StockGraph:
         #     self.KIS_ACCESS_TOKEN = None
         #     print(f"{token_path} 파일이 없습니다.")
 
+        # Reuse HTTP session to speed up API calls
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         self.company_df = None
         self.price_df = None
         self.competitor_df = None
@@ -60,7 +64,7 @@ class StockGraph:
 
         company_kis_li = []
         for stock_code in tqdm(stock_code_li, desc='Collect kis company info'):
-            _company_kis = _get_company_df_kis(stock_code, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN)
+            _company_kis = _get_company_df_kis(stock_code, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN, self.session)
             company_kis_li.append(_company_kis)
             time.sleep(self.sleep_sec)
 
@@ -78,7 +82,7 @@ class StockGraph:
         price_kis_li = []
         for date in self.date_li:
             for stock_code in tqdm(stock_code_li, desc=f'Collect kis company info (date: {date})'):
-                _price_kis = _get_price_df_kis(stock_code, date, date, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN)
+                _price_kis = _get_price_df_kis(stock_code, date, date, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN, self.session)
                 price_kis_li.append(_price_kis)
                 time.sleep(self.sleep_sec)
 
@@ -193,7 +197,7 @@ def _get_company_df_krx():
     return df
 
 # 회사 정보 수집(KIS)
-def _get_company_df_kis(stock_code, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKEN):
+def _get_company_df_kis(stock_code, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKEN, session: requests.Session):
     """
     - 출처: KIS
     - 소요시간: 6분30초
@@ -212,7 +216,7 @@ def _get_company_df_kis(stock_code, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKE
         "PDNO": stock_code
     }
 
-    res = requests.get(url, headers=headers, params=params)
+    res = session.get(url, headers=headers, params=params)
     data = res.json()
     if data.get("rt_cd") != "0":
         print(f"[{stock_code}] 오류 발생: {data.get('msg1')}")
@@ -228,7 +232,7 @@ def _get_company_df_kis(stock_code, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKE
     return df
 
 # 주식 지표, 주가 수집
-def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKEN):
+def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKEN, session: requests.Session):
     """
     - 출처: KIS
     - 소요시간: 6분30초
@@ -250,7 +254,7 @@ def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET,
         "FID_PERIOD_DIV_CODE": "D",
         "FID_ORG_ADJ_PRC": 1
     }
-    res = requests.get(url, headers=headers, params=params)
+    res = session.get(url, headers=headers, params=params)
     data = res.json()
     if data.get("rt_cd") != "0":
         print(f"[{stock_code}] 조회 실패: {data.get('msg1')}")

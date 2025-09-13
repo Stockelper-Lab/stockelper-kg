@@ -29,17 +29,24 @@ def main(date_st, date_fn):
     graph_df = stock_graph.run_all()
     
     stock_code_li = graph_df.stock_code
-    company_nm_li = graph_df.stock_abbrv
     graph = StockKnowledgeGraph()
-    
-    for stock_code, company_nm in tqdm(zip(stock_code_li, company_nm_li), total=len(stock_code_li), desc="Generate graph db..."):
+    # 제약조건은 1회만 생성
+    graph.ensure_constraints()
+
+    for stock_code in tqdm(stock_code_li, total=len(stock_code_li), desc="Generate graph db..."):
         create_graph_db(graph, graph_df, stock_code, date_li)
 
-if __name__ == "__main__":
+    # 모든 작업 후에만 닫기
+    graph.close()
+
+def cli():
     args = parse_args()
     date_st = args.date_st
     date_fn = args.date_fn
     logger.info(f"Date: {date_st} ~ {date_fn}")
     main(date_st, date_fn)
+
+if __name__ == "__main__":
+    cli()
 
 # python run_graphdb.py --date_st 20250724 --date_fn 20250725

@@ -19,11 +19,23 @@ class StockKnowledgeGraph:
     def close(self):
         self.driver.close()
 
-    # 스키마 추가
-    def create_schema(self, cypher_query):
+    # 제약조건을 1회만 생성
+    def ensure_constraints(self):
         with self.driver.session() as session:
             session.execute_write(self._create_constraints)
+
+    # 데이터만 추가 (제약조건은 ensure_constraints에서 한 번만 생성)
+    def create_schema(self, cypher_query):
+        with self.driver.session() as session:
             session.execute_write(self._create_data, cypher_query)
+
+    # 여러 쿼리를 하나의 트랜잭션으로 실행 (성능 개선)
+    def run_queries(self, queries):
+        def _run_all(tx, qs):
+            for q in qs:
+                tx.run(q)
+        with self.driver.session() as session:
+            session.execute_write(_run_all, queries)
 
     # 노드 삭제
     def delete_data(self):
