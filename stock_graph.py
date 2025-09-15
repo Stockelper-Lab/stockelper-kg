@@ -13,6 +13,8 @@ import time
 import json
 import ast
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import warnings
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -42,9 +44,19 @@ class StockGraph:
         #     self.KIS_ACCESS_TOKEN = None
         #     print(f"{token_path} 파일이 없습니다.")
 
-        # Reuse HTTP session to speed up API calls
+        # Reuse HTTP session with retry strategy
         self.session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50)
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+        adapter = HTTPAdapter(
+            pool_connections=20, 
+            pool_maxsize=50,
+            max_retries=retry_strategy
+        )
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
 
@@ -65,7 +77,16 @@ class StockGraph:
         company_kis_li = []
         for stock_code in tqdm(stock_code_li, desc='Collect kis company info'):
             _company_kis = _get_company_df_kis(stock_code, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN, self.session)
-            company_kis_li.append(_company_kis)
+            if _company_kis is not None:
+                company_kis_li.append(_company_kis)
+            else:
+                # 실패한 경우 기본값으로 DataFrame 생성
+                default_company = pd.DataFrame({
+                    'stock_code': [stock_code],
+                    'kospi200_item_yn': ['N'],
+                    'stock_sector_nm': ['정보없음']
+                })
+                company_kis_li.append(default_company)
             time.sleep(self.sleep_sec)
 
         company_df_kis = pd.concat(company_kis_li, ignore_index=True)
@@ -81,9 +102,24 @@ class StockGraph:
 
         price_kis_li = []
         for date in self.date_li:
-            for stock_code in tqdm(stock_code_li, desc=f'Collect kis company info (date: {date})'):
+            for stock_code in tqdm(stock_code_li, desc=f'Collect kis price info (date: {date})'):
                 _price_kis = _get_price_df_kis(stock_code, date, date, self.KIS_APP_KEY, self.KIS_APP_SECRET, self.KIS_ACCESS_TOKEN, self.session)
-                price_kis_li.append(_price_kis)
+                if _price_kis is not None:
+                    price_kis_li.append(_price_kis)
+                else:
+                    # 실패한 경우 기본값으로 DataFrame 생성
+                    default_price = pd.DataFrame({
+                        'stock_code': [stock_code],
+                        'date': [date],
+                        'stck_hgpr': [0],
+                        'stck_lwpr': [0],
+                        'stck_oprc': [0],
+                        'stck_clpr': [0],
+                        'eps': [0],
+                        'pbr': [0],
+                        'per': [0]
+                    })
+                    price_kis_li.append(default_price)
                 time.sleep(self.sleep_sec)
 
         self.price_df = pd.concat(price_kis_li, ignore_index=True)
@@ -212,31 +248,49 @@ def _get_company_df_kis(stock_code, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKE
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/search-stock-info"
     headers = {
         "Content-Type": "application/json",
-        "authorization": f"Bearer {KIS_ACCESS_TOKEN}",  # Bearer 접두사 포함
+        "authorization": f"Bearer {KIS_ACCESS_TOKEN}",
         "appkey": KIS_APP_KEY,
         "appsecret": KIS_APP_SECRET,
-        "tr_id": "CTPF1002R",  # 실전 투자용
+        "tr_id": "CTPF1002R",
         "custtype": "P",
     }
     params = {
-        "PRDT_TYPE_CD": "300", # 300: 주식, ETF, ETN, ELW
+        "PRDT_TYPE_CD": "300",
         "PDNO": stock_code
     }
 
-    res = session.get(url, headers=headers, params=params)
-    data = res.json()
-    if data.get("rt_cd") != "0":
-        print(f"[{stock_code}] 오류 발생: {data.get('msg1')}")
-        return None
-    if not data:
-        print(f"[{stock_code}] 데이터가 없습니다.")
-        return None
-        
-    df = pd.DataFrame([data['output']])
-    df["stock_code"] = stock_code  # 종목코드 추가
-    df = df[['stock_code','kospi200_item_yn','std_idst_clsf_cd_name']]
-    df = df.rename(columns={'std_idst_clsf_cd_name':'stock_sector_nm'})
-    return df
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            res = session.get(url, headers=headers, params=params, timeout=30)
+            data = res.json()
+            
+            if data.get("rt_cd") != "0":
+                logger.warning(f"[{stock_code}] API 오류: {data.get('msg1')}")
+                return None
+                
+            if not data or 'output' not in data:
+                logger.warning(f"[{stock_code}] 데이터가 없습니다.")
+                return None
+                
+            df = pd.DataFrame([data['output']])
+            df["stock_code"] = stock_code
+            df = df[['stock_code','kospi200_item_yn','std_idst_clsf_cd_name']]
+            df = df.rename(columns={'std_idst_clsf_cd_name':'stock_sector_nm'})
+            return df
+            
+        except (requests.exceptions.ConnectionError, 
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException) as e:
+            logger.warning(f"[{stock_code}] 연결 오류 (시도 {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 지수 백오프
+            else:
+                logger.error(f"[{stock_code}] 최대 재시도 횟수 초과")
+                return None
+        except Exception as e:
+            logger.error(f"[{stock_code}] 예상치 못한 오류: {str(e)}")
+            return None
 
 # 주식 지표, 주가 수집
 def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCESS_TOKEN, session: requests.Session):
@@ -246,12 +300,12 @@ def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET,
     """
     url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
     headers = {
-    "Content-Type": "application/json",
-    "authorization": f"Bearer {KIS_ACCESS_TOKEN}",
-    "appkey": KIS_APP_KEY,
-    "appsecret": KIS_APP_SECRET,
-    "tr_id": "FHKST03010100",  # 실전 투자용
-    "custtype": "P"
+        "Content-Type": "application/json",
+        "authorization": f"Bearer {KIS_ACCESS_TOKEN}",
+        "appkey": KIS_APP_KEY,
+        "appsecret": KIS_APP_SECRET,
+        "tr_id": "FHKST03010100",
+        "custtype": "P"
     }
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
@@ -261,33 +315,51 @@ def _get_price_df_kis(stock_code, date_st, date_fn, KIS_APP_KEY, KIS_APP_SECRET,
         "FID_PERIOD_DIV_CODE": "D",
         "FID_ORG_ADJ_PRC": 1
     }
-    res = session.get(url, headers=headers, params=params)
-    data = res.json()
-    if data.get("rt_cd") != "0":
-        print(f"[{stock_code}] 조회 실패: {data.get('msg1')}")
-        return None
-    if not data:
-        print(f"[{stock_code}] 데이터가 없습니다.")
-        return None
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            res = session.get(url, headers=headers, params=params, timeout=30)
+            data = res.json()
+            
+            if data.get("rt_cd") != "0":
+                logger.warning(f"[{stock_code}] 주가 조회 실패: {data.get('msg1')}")
+                return None
+                
+            if not data or 'output1' not in data or 'output2' not in data:
+                logger.warning(f"[{stock_code}] 주가 데이터가 없습니다.")
+                return None
 
-    try:
-        price_dict = {
-            'stock_code': stock_code,
-            'date': date_st,
-            'stck_hgpr': data['output2'][0]['stck_hgpr'],
-            'stck_lwpr': data['output2'][0]['stck_lwpr'],
-            'stck_oprc': data['output2'][0]['stck_oprc'],
-            'stck_clpr': data['output2'][0]['stck_clpr'],
-            'eps': data['output1']['eps'],
-            'pbr': data['output1']['pbr'],
-            'per': data['output1']['per']
-        }
-        price_df = pd.DataFrame([price_dict])
-        return price_df
-        
-    except Exception as e:
-        logger.error(f"Error to DB connection: {e}")
-        logger.info(data)
+            if not data['output2']:  # 빈 리스트인 경우
+                logger.warning(f"[{stock_code}] 해당 날짜의 주가 데이터가 없습니다.")
+                return None
+                
+            price_dict = {
+                'stock_code': stock_code,
+                'date': date_st,
+                'stck_hgpr': data['output2'][0].get('stck_hgpr', 0),
+                'stck_lwpr': data['output2'][0].get('stck_lwpr', 0),
+                'stck_oprc': data['output2'][0].get('stck_oprc', 0),
+                'stck_clpr': data['output2'][0].get('stck_clpr', 0),
+                'eps': data['output1'].get('eps', 0),
+                'pbr': data['output1'].get('pbr', 0),
+                'per': data['output1'].get('per', 0)
+            }
+            price_df = pd.DataFrame([price_dict])
+            return price_df
+            
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException) as e:
+            logger.warning(f"[{stock_code}] 주가 연결 오류 (시도 {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 지수 백오프
+            else:
+                logger.error(f"[{stock_code}] 주가 조회 최대 재시도 횟수 초과")
+                return None
+        except Exception as e:
+            logger.error(f"[{stock_code}] 주가 조회 예상치 못한 오류: {str(e)}")
+            return None
 
 # MongoDB 연동(경쟁사)
 def _get_competitor_df(DB_URI, DB_NAME, DB_COLLECTION_NAME):
