@@ -1,26 +1,30 @@
 version: "3.9"
-
 services:
   neo4j:
-    image: neo4j:5.22
+    image: neo4j:latest
     container_name: stockelper-neo4j
     environment:
       - NEO4J_AUTH=neo4j/password
-      - NEO4J_server_memory_pagecache_size=512M
-      - NEO4J_server_memory_heap_initial__size=512M
-      - NEO4J_server_memory_heap_max__size=512M
+      - NEO4J_server_memory_pagecache_size=2G
+      - NEO4J_server_memory_heap_initial__size=2G
+      - NEO4J_server_memory_heap_max__size=4G
     ports:
-      - "7474:7474"   # HTTP
-      - "7687:7687"   # Bolt
+      - "21004:7474"   # HTTP
+      - "21005:7687"   # Bolt
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
+      - neo4j_conf:/conf
+      - neo4j_plugins:/plugins
     networks:
       - stockelper
+    restart: always
 
 volumes:
   neo4j_data:
   neo4j_logs:
+  neo4j_conf:
+  neo4j_plugins:
 
 networks:
   stockelper:
