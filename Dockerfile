@@ -17,12 +17,15 @@ WORKDIR /app
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# Copy project files
+COPY pyproject.toml uv.lock* ./
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+
 # Install Python deps with uv (faster, reproducible)
-COPY pyproject.toml ./
 RUN uv sync --frozen || uv sync
 
-# Copy project files
-COPY . .
-RUN chmod +x /app/entrypoint.sh || true
+# Make scripts executable
+RUN chmod +x /app/scripts/*.sh
 
-CMD ["/app/entrypoint.sh"]
+CMD ["/app/scripts/entrypoint.sh"]
