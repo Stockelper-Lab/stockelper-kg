@@ -20,10 +20,13 @@ dependencies = [
   "tqdm>=4.65,<5",
   "pymongo>=4.3,<5",
   "finance-datareader>=0.9.90,<1.0",
+  "openai>=1.0.0",
+  "beautifulsoup4>=4.9.0",
 ]
 
 [project.scripts]
 stockelper-kg = "stockelper_kg.cli:cli"
+stockelper-kg-events = "stockelper_kg.event_cli:cli"
 
 [build-system]
 requires = ["hatchling"]
