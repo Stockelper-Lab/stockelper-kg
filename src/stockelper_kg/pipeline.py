@@ -42,12 +42,10 @@ class EventPipeline:
         event_text: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = self._analyze(event_text)
+        result = self._analyze(event_text, metadata)
         self._save_event(result.event_data, metadata)
-
         if result.stock_code and result.date:
             self._save_company(result.stock_code, result.date)
-
         return result.event_data
 
     def _create_collector(self, config: Config) -> EventCollector:
@@ -60,7 +58,9 @@ class EventPipeline:
             competitors=MongoDBCollector(config.mongodb),
         )
 
-    def _analyze(self, text: str) -> EventResult:
+    def _analyze(
+        self, text: str, metadata: dict[str, Any] | None = None
+    ) -> EventResult:
         logger.info("Analyzing event...")
         event_data = classify_event(text)
 
@@ -69,28 +69,24 @@ class EventPipeline:
             slots = {}
             event_data["required_slots"] = slots
 
-        corp_name = event_data.get("corp_name", "").strip()
+        corp_name = (event_data.get("corp_name") or "").strip()
+        if not corp_name and metadata:
+            corp_name = (metadata.get("corp_name") or "").strip()
         if not corp_name:
             raise ValueError("corp_name is required")
         slots["corp_name"] = corp_name
+        event_data["corp_name"] = corp_name
 
-        raw_date = slots.get("date") or event_data.get("date")
-        if raw_date:
-            canonical_date = normalize_date(raw_date)
-            if canonical_date:
-                slots["date"] = canonical_date
-                event_data["date"] = canonical_date
+        if raw_date := slots.get("date") or event_data.get("date"):
+            if normalized_date := normalize_date(raw_date):
+                slots["date"] = event_data["date"] = normalized_date
 
-        stock_code = slots.get("stock_code")
-        if not stock_code:
-            stock_code = self.collector.resolve(corp_name)
+        stock_code = slots.get("stock_code") or self.collector.resolve(corp_name)
         if stock_code:
             slots["stock_code"] = stock_code
 
         return EventResult(
-            event_data=event_data,
-            stock_code=stock_code,
-            date=slots.get("date"),
+            event_data=event_data, stock_code=stock_code, date=slots.get("date")
         )
 
     def _save_event(
@@ -98,18 +94,7 @@ class EventPipeline:
         event_data: dict[str, Any],
         metadata: dict[str, Any] | None,
     ) -> None:
-        slots = event_data.get("required_slots", {})
-        if not isinstance(slots, dict):
-            slots = {}
-            event_data["required_slots"] = slots
-
-        corp_name = event_data.get("corp_name", "").strip()
-        if not corp_name and metadata:
-            corp_name = (metadata.get("corp_name") or "").strip()
-        if not corp_name:
-            raise ValueError("corp_name is required")
-        slots["corp_name"] = corp_name
-
+        corp_name = event_data.get("corp_name")
         logger.info("[%s] Saving event graph...", corp_name)
         payload = build_graph_payload(event_data, metadata=metadata)
         cypher = payload_to_cypher(payload)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,11 +38,6 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="directory",
         type=str,
         help="Directory containing *.txt files (recursive)",
-    )
-    src.add_argument(
-        "--dataset",
-        type=str,
-        help="JSONL dataset where each line is an event record",
     )
     parser.add_argument(
         "--env",
@@ -82,66 +76,11 @@ def _collect_from_directory(dir_str: str) -> List[EventInput]:
     return inputs
 
 
-def _collect_from_dataset(dataset_str: str) -> List[EventInput]:
-    dataset_path = Path(dataset_str).expanduser().resolve()
-    if not dataset_path.is_file():
-        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
-
-    inputs: List[EventInput] = []
-    with dataset_path.open("r", encoding="utf-8") as handle:
-        for idx, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{dataset_path}:{idx} is not valid JSON: {exc}"
-                ) from exc
-
-            text = record.get("content") or record.get("text")
-            content_file = record.get("content_file")
-            if not text and content_file:
-                file_path = Path(content_file)
-                if not file_path.is_absolute():
-                    file_path = (dataset_path.parent / file_path).resolve()
-                text = _read_text_file(file_path)
-            if not text:
-                raise ValueError(
-                    f"{dataset_path}:{idx} missing 'content' or 'content_file'."
-                )
-
-            extra_meta: Dict[str, Any] = {}
-            if isinstance(record.get("metadata"), dict):
-                extra_meta.update(record["metadata"])
-            for key, value in record.items():
-                if key in {"content", "content_file", "metadata", "text"}:
-                    continue
-                extra_meta.setdefault(key, value)
-            if content_file:
-                extra_meta.setdefault("content_file", content_file)
-
-            identifier = (
-                record.get("description")
-                or record.get("url")
-                or f"{dataset_path.name}:{idx}"
-            )
-
-            inputs.append(EventInput(str(identifier), text, extra_meta))
-
-    if not inputs:
-        raise ValueError(f"{dataset_path} did not yield any records.")
-    return inputs
-
-
 def _collect_inputs(args: argparse.Namespace) -> List[EventInput]:
     if args.file:
         return _collect_from_file(args.file)
     if getattr(args, "directory", None):
         return _collect_from_directory(args.directory)
-    if args.dataset:
-        return _collect_from_dataset(args.dataset)
     return []
 
 

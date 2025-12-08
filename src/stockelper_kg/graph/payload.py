@@ -6,19 +6,17 @@ from typing import Any
 
 from ..utils.dates import build_date_properties, normalize_date
 from .ontology import ONTOLOGY
-from .schema import GraphBuildContext, GraphPayload, clean_props
+from .schema import GraphBuildContext, GraphNodeSpec, GraphPayload, clean_props
 
 _EVENT_DEFINITIONS = ONTOLOGY.event_map
 
 
 def _has_value(val: Any) -> bool:
-    if val is None:
-        return False
     if isinstance(val, str):
         return bool(val.strip())
     if isinstance(val, (list, tuple, set, dict)):
         return bool(val)
-    return True
+    return val is not None
 
 
 def build_graph_payload(
@@ -32,10 +30,11 @@ def build_graph_payload(
     if not definition:
         raise ValueError(f"Unknown event_type: {event_type}")
 
-    slots = {}
+    slots: dict[str, Any] = {}
     for key in ("required_slots", "optional_slots"):
-        if isinstance(event_data.get(key), dict):
-            slots.update(event_data[key])
+        data = event_data.get(key)
+        if isinstance(data, dict):
+            slots.update(data)
 
     missing = [s for s in definition.required_slots if not _has_value(slots.get(s))]
     if missing:
@@ -46,12 +45,8 @@ def build_graph_payload(
         raise ValueError("corp_name is required")
     slots["corp_name"] = corp_name
 
-    date = slots.get("date") or event_data.get("date")
-    if date:
-        from ..utils.dates import normalize_date
-
-        resolved_date = normalize_date(date)
-        if resolved_date:
+    if date := slots.get("date") or event_data.get("date"):
+        if resolved_date := normalize_date(date):
             slots["date"] = resolved_date
 
     doc_info = _extract_document_info(metadata, event_data)
@@ -82,18 +77,32 @@ def build_stock_snapshot_payload(
     stock_node = context.add_node("StockPrice", price_props)
     context.add_edge("HAS_STOCK_PRICE", company_node.key, stock_node.key)
 
-    date_props = build_date_properties(date)
-    if date_props:
-        date_node = context.add_node("Date", date_props)
-        context.add_edge("RECORDED_ON", stock_node.key, date_node.key)
+    if price_date := _attach_typed_date_node(
+        context, "PriceDate", date, company_node=company_node
+    ):
+        context.add_edge("RECORDED_ON", stock_node.key, price_date.key)
 
     if financials:
         fs_node = context.add_node("FinancialStatements", financials)
         context.add_edge("HAS_FINANCIAL_STATEMENTS", company_node.key, fs_node.key)
+        if fs_date := _attach_typed_date_node(
+            context,
+            "FinancialDate",
+            financials.get("reported_date") or financials.get("date") or date,
+            company_node=company_node,
+        ):
+            context.add_edge("REPORTED_ON", fs_node.key, fs_date.key)
 
     if indicators:
         indicator_node = context.add_node("Indicator", indicators)
         context.add_edge("HAS_INDICATOR", company_node.key, indicator_node.key)
+        if ind_date := _attach_typed_date_node(
+            context,
+            "IndicatorDate",
+            indicators.get("as_of") or indicators.get("date") or date,
+            company_node=company_node,
+        ):
+            context.add_edge("MEASURED_ON", indicator_node.key, ind_date.key)
 
     return context.to_payload()
 
@@ -114,21 +123,22 @@ def _extract_document_info(
     metadata: dict[str, Any] | None,
     event_data: dict[str, Any],
 ) -> dict[str, Any] | None:
-    sources: list[dict[str, Any]] = []
-    if metadata:
-        sources.append(metadata)
-        if isinstance(metadata.get("document"), dict):
-            sources.append(metadata["document"])
-    for key in ("document", "metadata"):
-        if isinstance(event_data.get(key), dict):
-            sources.append(event_data[key])
-
-    merged: dict[str, Any] = {}
-    for source in sources:
-        for key, value in source.items():
-            if value not in (None, "", []):
-                merged[key] = value
-
+    candidates = [
+        src
+        for src in (
+            metadata,
+            metadata.get("document") if metadata else None,
+            event_data.get("document"),
+            event_data.get("metadata"),
+        )
+        if isinstance(src, dict)
+    ]
+    merged = {
+        key: value
+        for source in candidates
+        for key, value in source.items()
+        if value not in (None, "", [])
+    }
     if not merged:
         return None
 
@@ -141,7 +151,6 @@ def _extract_document_info(
             if cleaned.get(key):
                 cleaned["document_id"] = cleaned[key]
                 break
-
     return cleaned
 
 
@@ -156,9 +165,7 @@ def _generate_event_id(
         content = f"{doc_info['document_id']}::{event_type or ''}"
     else:
         parts = [p for p in (corp_name, event_type, date, summary) if p]
-        if not parts:
-            return f"EVT_{uuid.uuid4().hex[:12].upper()}"
-        content = "::".join(parts)
+        content = "::".join(parts) if parts else f"EVT_{uuid.uuid4().hex[:12].upper()}"
     digest = hashlib.sha1(content.encode()).hexdigest()
     return f"EVT_{digest[:12].upper()}"
 
@@ -172,27 +179,23 @@ def _build_event_graph(
 ) -> GraphPayload:
     context = GraphBuildContext()
 
-    company_node = context.add_node(
-        "Company",
-        {
-            "corp_name": corp_name,
-            "stock_nm": corp_name,
-            "corp_code": slots.get("corp_code"),
-            "stock_code": slots.get("stock_code"),
-        },
-    )
+    company_node = context.add_node("Company", {
+        "corp_name": corp_name,
+        "stock_nm": corp_name,
+        "corp_code": slots.get("corp_code"),
+        "stock_code": slots.get("stock_code"),
+    })
 
-    event_props = {k: v for k, v in slots.items() if k != "date"}
-    event_props["type"] = event_type
+    event_props = {**{k: v for k, v in slots.items() if k != "date"}, "type": event_type}
     event_props["summary"] = summary.strip() if summary else ""
     event_node = context.add_node("Event", event_props)
     context.add_edge("INVOLVED_IN", company_node.key, event_node.key)
 
     if date_str := slots.get("date"):
-        date_props = build_date_properties(date_str)
-        if date_props:
-            date_node = context.add_node("Date", date_props)
-            context.add_edge("OCCURRED_ON", event_node.key, date_node.key)
+        if event_date := _attach_typed_date_node(
+            context, "EventDate", date_str, company_node=company_node
+        ):
+            context.add_edge("OCCURRED_ON", event_node.key, event_date.key)
 
     if doc_info:
         doc_node = context.add_node("Document", doc_info)
@@ -205,3 +208,22 @@ def _normalize_stock_price(props: dict[str, Any]) -> dict[str, Any]:
     props.setdefault("stck_prpr", props.get("stck_clpr"))
     props.setdefault("stck_clpr", props.get("stck_prpr"))
     return props
+
+
+def _attach_typed_date_node(
+    context: GraphBuildContext,
+    label: str,
+    date_value: Any,
+    company_node: GraphNodeSpec | None = None,
+) -> GraphNodeSpec | None:
+    date_props = build_date_properties(date_value)
+    if not date_props:
+        return None
+
+    hub_date = context.add_node("Date", date_props)
+    if company_node:
+        context.add_edge("ON_DATE", company_node.key, hub_date.key)
+
+    typed_date = context.add_node(label, date_props)
+    context.add_edge("IS_DATE", typed_date.key, hub_date.key)
+    return typed_date

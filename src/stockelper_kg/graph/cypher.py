@@ -10,27 +10,16 @@ def payload_to_cypher(payload: GraphPayload) -> str:
     alias_map = {node.key: f"n{idx}" for idx, node in enumerate(payload.nodes)}
     statements = []
 
-    for idx, node in enumerate(payload.nodes):
-        alias = f"n{idx}"
+    for node in payload.nodes:
+        alias = alias_map[node.key]
         identity_keys = _get_identity_keys(node.label, node.properties)
-        identity_props = {
-            k: node.properties[k] for k in identity_keys if k in node.properties
-        }
-        if not identity_props:
-            identity_props = dict(node.properties)
-
-        merge_props = ", ".join(
-            f"{k}: {_format_value(v)}" for k, v in sorted(identity_props.items())
-        )
+        identity_props = {k: node.properties[k] for k in identity_keys if k in node.properties} or dict(node.properties)
+        merge_props = ", ".join(f"{k}: {_format_value(v)}" for k, v in sorted(identity_props.items()))
         statements.append(f"MERGE ({alias}:{node.label} {{{merge_props}}})")
 
-        remaining = {
-            k: v for k, v in node.properties.items() if k not in identity_props
-        }
+        remaining = {k: v for k, v in node.properties.items() if k not in identity_props}
         if remaining:
-            set_props = ", ".join(
-                f"{k}: {_format_value(v)}" for k, v in sorted(remaining.items())
-            )
+            set_props = ", ".join(f"{k}: {_format_value(v)}" for k, v in sorted(remaining.items()))
             statements.append(f"SET {alias} += {{{set_props}}}")
 
     for edge in payload.edges:
@@ -47,20 +36,15 @@ def payload_to_cypher(payload: GraphPayload) -> str:
 
 def _get_identity_keys(label: str, props: dict[str, Any]) -> tuple[str, ...]:
     definition = ONTOLOGY.node_map.get(label)
-    if not definition or not definition.primary_keys:
-        return ()
-    for key_tuple in definition.primary_keys:
-        if all(k in props and _has_value(props[k]) for k in key_tuple):
-            return key_tuple
+    if definition and definition.primary_keys:
+        for key_tuple in definition.primary_keys:
+            if all(_has_value(props.get(k)) for k in key_tuple):
+                return key_tuple
     return ()
 
 
 def _has_value(val: Any) -> bool:
-    if val is None:
-        return False
-    if isinstance(val, str):
-        return bool(val.strip())
-    return True
+    return bool(val.strip()) if isinstance(val, str) else val is not None
 
 
 def _format_value(value: Any) -> str:
