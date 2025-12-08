@@ -381,6 +381,98 @@ _NODE_DEFINITIONS: Tuple[NodeDefinition, ...] = (
         ),
     ),
     NodeDefinition(
+        name="PriceDate",
+        description="시세 데이터 전용 날짜 노드 (캘린더 Date와 매핑)",
+        separation_reason="시세 노드 수가 많아도 공용 Date 과밀을 피하기 위함",
+        examples=("2025-01-01",),
+        primary_keys=(("date",),),
+        properties=(
+            NodeProperty("날짜", "date", "내부", "YYYY-MM-DD 포맷"),
+            NodeProperty("연도", "year", "내부", "int(date[:4])"),
+            NodeProperty(
+                "월",
+                "month",
+                "내부",
+                'int(date.replace("-", "")[4:6])',
+            ),
+            NodeProperty(
+                "일",
+                "day",
+                "내부",
+                'int(date.replace("-", "")[6:8])',
+            ),
+        ),
+    ),
+    NodeDefinition(
+        name="FinancialDate",
+        description="재무제표 전용 날짜 노드 (캘린더 Date와 매핑)",
+        separation_reason="재무 데이터의 기준/공시일을 캘린더 Date와 분리",
+        examples=("2025-02-15",),
+        primary_keys=(("date",),),
+        properties=(
+            NodeProperty("날짜", "date", "내부", "YYYY-MM-DD 포맷"),
+            NodeProperty("연도", "year", "내부", "int(date[:4])"),
+            NodeProperty(
+                "월",
+                "month",
+                "내부",
+                'int(date.replace("-", "")[4:6])',
+            ),
+            NodeProperty(
+                "일",
+                "day",
+                "내부",
+                'int(date.replace("-", "")[6:8])',
+            ),
+        ),
+    ),
+    NodeDefinition(
+        name="IndicatorDate",
+        description="파생 지표 전용 날짜 노드 (캘린더 Date와 매핑)",
+        separation_reason="Indicator 시계열을 캘린더 Date로 묶기 전 완충층",
+        examples=("2025-01-01",),
+        primary_keys=(("date",),),
+        properties=(
+            NodeProperty("날짜", "date", "내부", "YYYY-MM-DD 포맷"),
+            NodeProperty("연도", "year", "내부", "int(date[:4])"),
+            NodeProperty(
+                "월",
+                "month",
+                "내부",
+                'int(date.replace("-", "")[4:6])',
+            ),
+            NodeProperty(
+                "일",
+                "day",
+                "내부",
+                'int(date.replace("-", "")[6:8])',
+            ),
+        ),
+    ),
+    NodeDefinition(
+        name="EventDate",
+        description="이벤트 전용 날짜 노드 (캘린더 Date와 매핑)",
+        separation_reason="뉴스/공시 이벤트의 일자를 캘린더 Date와 분리",
+        examples=("2025-01-01",),
+        primary_keys=(("date",),),
+        properties=(
+            NodeProperty("날짜", "date", "내부", "YYYY-MM-DD 포맷"),
+            NodeProperty("연도", "year", "내부", "int(date[:4])"),
+            NodeProperty(
+                "월",
+                "month",
+                "내부",
+                'int(date.replace("-", "")[4:6])',
+            ),
+            NodeProperty(
+                "일",
+                "day",
+                "내부",
+                'int(date.replace("-", "")[6:8])',
+            ),
+        ),
+    ),
+    NodeDefinition(
         name="FinancialStatements",
         description="재무제표 계정 단위 데이터",
         separation_reason="정량 값 추적",
@@ -556,6 +648,15 @@ _EDGE_DEFINITIONS: Tuple[EdgeDefinition, ...] = (
         "HAS_SECURITY", "Company → Security", "종목 코드 매핑", "삼성전자 → 005930"
     ),
     EdgeDefinition(
+        "ON_DATE", "Company → Date", "회사 단위 날짜 허브 연결", "삼성전자 → 2025-01-01"
+    ),
+    EdgeDefinition(
+        "IS_DATE",
+        "PriceDate/FinancialDate/IndicatorDate/EventDate → Date",
+        "타입별 날짜를 공용 캘린더 Date에 매핑",
+        "PriceDate → 2025-01-01",
+    ),
+    EdgeDefinition(
         "HAS_STOCK_PRICE",
         "Company → StockPrice",
         "일별 주가 연결",
@@ -568,10 +669,22 @@ _EDGE_DEFINITIONS: Tuple[EdgeDefinition, ...] = (
         "삼성전자 → FY2024 재무제표",
     ),
     EdgeDefinition(
+        "REPORTED_ON",
+        "FinancialStatements → FinancialDate",
+        "재무제표 기준/공시일 연결 (타입별 날짜 노드)",
+        "FY2024 재무제표 → 2025-02-15",
+    ),
+    EdgeDefinition(
         "HAS_INDICATOR",
         "Company → Indicator",
         "파생 재무지표 연결",
         "삼성전자 → EPS/PER",
+    ),
+    EdgeDefinition(
+        "MEASURED_ON",
+        "Indicator → IndicatorDate",
+        "파생 지표 기준일 연결 (타입별 날짜 노드)",
+        "EPS/PER → 2025-01-01",
     ),
     EdgeDefinition(
         "HAS_OFFICER", "Company → Person", "임원/CEO 연결", "삼성전자 → 이재용"
@@ -634,10 +747,16 @@ _EDGE_DEFINITIONS: Tuple[EdgeDefinition, ...] = (
         "HAS_EVENT", "Company → Event", "레거시 이벤트 연결", "삼성전자 → 2025Q1"
     ),
     EdgeDefinition(
-        "OCCURRED_ON", "Event → Date", "이벤트 발생일 연결", "증설 → 2025-09-01"
+        "OCCURRED_ON",
+        "Event → EventDate",
+        "이벤트 발생일 연결 (타입별 날짜 노드)",
+        "증설 → 2025-09-01",
     ),
     EdgeDefinition(
-        "RECORDED_ON", "StockPrice → Date", "시세 기록 날짜", "주가 → 2025-09-01"
+        "RECORDED_ON",
+        "StockPrice → PriceDate",
+        "시세 기록 날짜 (타입별 날짜 노드)",
+        "주가 → 2025-09-01",
     ),
 )
 
