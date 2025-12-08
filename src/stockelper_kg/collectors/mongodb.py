@@ -41,6 +41,9 @@ class MongoDBCollector(BaseCollector):
             data = list(documents)
 
             if data:
+                self.logger.info(f"Found {len(data)} documents in MongoDB")
+                self.logger.debug(f"Sample document: {data[0]}")
+
                 competitor_df = pd.DataFrame(data)
                 self.logger.info("Converted MongoDB to competitor_df")
                 competitor_df = competitor_df.rename(columns={"_id": "stock_code"})
@@ -68,7 +71,9 @@ class MongoDBCollector(BaseCollector):
 
         except Exception as e:
             self.logger.error(f"Failed to connect to DB: {e}")
-            self.logger.info("Using empty competitor DataFrame due to connection failure")
+            self.logger.info(
+                "Using empty competitor DataFrame due to connection failure"
+            )
             return pd.DataFrame(columns=["stock_code", "compete_code_li"])
         finally:
             try:

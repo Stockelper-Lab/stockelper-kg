@@ -1,10 +1,13 @@
 """Configuration management for Stockelper KG."""
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,7 +64,10 @@ class Config:
         Raises:
             ValueError: If required environment variables are missing
         """
-        load_dotenv(dotenv_path=env_path)
+        try:
+            load_dotenv(dotenv_path=env_path)
+        except OSError as exc:
+            logger.warning("Skipping .env load during config init: %s", exc)
 
         # Neo4j
         neo4j = Neo4jConfig(

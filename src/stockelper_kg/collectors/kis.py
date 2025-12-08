@@ -20,7 +20,9 @@ from .base import BaseCollector
 class KISCollector(BaseCollector):
     """Collector for Korea Investment & Securities API."""
 
-    def __init__(self, config: KISConfig, sleep_seconds: float = 0.1, env_path: str = ".env"):
+    def __init__(
+        self, config: KISConfig, sleep_seconds: float = 0.1, env_path: str = ".env"
+    ):
         """Initialize KIS collector.
 
         Args:
@@ -64,24 +66,28 @@ class KISCollector(BaseCollector):
             "appkey": self.config.app_key,
             "appsecret": self.config.app_secret,
         }
-        
+
         self.logger.info("Requesting new access token...")
         res = requests.post(url, headers=headers, data=json.dumps(data))
         response_data = res.json()
-        
+
         if res.status_code != 200:
-            self.logger.error(f"Token request failed: {res.status_code} - {response_data}")
-            raise requests.RequestException(f"Failed to get access token: {response_data}")
-        
+            self.logger.error(
+                f"Token request failed: {res.status_code} - {response_data}"
+            )
+            raise requests.RequestException(
+                f"Failed to get access token: {response_data}"
+            )
+
         new_token = response_data["access_token"]
         self.access_token = new_token
-        
+
         # Update .env file with new token
         self._update_env_file(new_token)
-        
+
         self.logger.info("Access token refreshed successfully")
         return new_token
-    
+
     def _update_env_file(self, new_token: str) -> None:
         """Update .env file with new access token.
 
@@ -93,27 +99,27 @@ class KISCollector(BaseCollector):
             if not env_file.exists():
                 self.logger.warning(f".env file not found at {self.env_path}")
                 return
-            
+
             # Read current .env content
-            content = env_file.read_text(encoding='utf-8')
-            
+            content = env_file.read_text(encoding="utf-8")
+
             # Update KIS_ACCESS_TOKEN value
             # Match pattern: KIS_ACCESS_TOKEN=<value> or KIS_ACCESS_TOKEN=
-            pattern = r'^(KIS_ACCESS_TOKEN=).*$'
-            replacement = f'KIS_ACCESS_TOKEN={new_token}'
-            
+            pattern = r"^(KIS_ACCESS_TOKEN=).*$"
+            replacement = f"KIS_ACCESS_TOKEN={new_token}"
+
             if re.search(pattern, content, re.MULTILINE):
                 # Replace existing token
                 new_content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
             else:
                 # Add token if not exists
                 self.logger.warning("KIS_ACCESS_TOKEN not found in .env, appending...")
-                new_content = content.rstrip() + f'\n{replacement}\n'
-            
+                new_content = content.rstrip() + f"\n{replacement}\n"
+
             # Write back to file
-            env_file.write_text(new_content, encoding='utf-8')
+            env_file.write_text(new_content, encoding="utf-8")
             self.logger.info(f"Updated KIS_ACCESS_TOKEN in {self.env_path}")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to update .env file: {e}")
 
@@ -160,30 +166,34 @@ class KISCollector(BaseCollector):
         for attempt in range(3):
             try:
                 res = self.session.get(url, headers=headers, params=params, timeout=30)
-                
+
                 # HTTP 상태 코드 체크 (500 에러 감지 - 토큰 만료 가능성)
                 if res.status_code >= 500:
                     self.logger.warning(
                         f"[{stock_code}] Server error {res.status_code} (attempt {attempt + 1}/3)"
                     )
-                    
+
                     # 첫 번째 시도에서 500 에러 시 토큰 재발급 시도
                     if attempt == 0:
-                        self.logger.info(f"[{stock_code}] Attempting to refresh access token...")
+                        self.logger.info(
+                            f"[{stock_code}] Attempting to refresh access token..."
+                        )
                         try:
                             self.access_token = self._refresh_access_token()
                             headers["authorization"] = f"Bearer {self.access_token}"
                             time.sleep(1)
                             continue
                         except Exception as e:
-                            self.logger.error(f"[{stock_code}] Token refresh failed: {e}")
-                    
+                            self.logger.error(
+                                f"[{stock_code}] Token refresh failed: {e}"
+                            )
+
                     if attempt < 2:
-                        time.sleep(3 ** attempt)  # 1초, 3초, 9초
+                        time.sleep(3**attempt)  # 1초, 3초, 9초
                         continue
                     else:
                         return None
-                
+
                 data = res.json()
 
                 if data.get("rt_cd") != "0":
@@ -251,30 +261,34 @@ class KISCollector(BaseCollector):
         for attempt in range(3):
             try:
                 res = self.session.get(url, headers=headers, params=params, timeout=30)
-                
+
                 # HTTP 상태 코드 체크 (500 에러 감지 - 토큰 만료 가능성)
                 if res.status_code >= 500:
                     self.logger.warning(
                         f"[{stock_code}] Server error {res.status_code} (attempt {attempt + 1}/3)"
                     )
-                    
+
                     # 첫 번째 시도에서 500 에러 시 토큰 재발급 시도
                     if attempt == 0:
-                        self.logger.info(f"[{stock_code}] Attempting to refresh access token...")
+                        self.logger.info(
+                            f"[{stock_code}] Attempting to refresh access token..."
+                        )
                         try:
                             self.access_token = self._refresh_access_token()
                             headers["authorization"] = f"Bearer {self.access_token}"
                             time.sleep(1)
                             continue
                         except Exception as e:
-                            self.logger.error(f"[{stock_code}] Token refresh failed: {e}")
-                    
+                            self.logger.error(
+                                f"[{stock_code}] Token refresh failed: {e}"
+                            )
+
                     if attempt < 2:
-                        time.sleep(3 ** attempt)  # 1초, 3초, 9초
+                        time.sleep(3**attempt)  # 1초, 3초, 9초
                         continue
                     else:
                         return None
-                
+
                 data = res.json()
 
                 if data.get("rt_cd") != "0":
@@ -292,13 +306,19 @@ class KISCollector(BaseCollector):
                     self.logger.warning(f"[{stock_code}] No price data")
                     return None
 
+                close_price = data["output2"][0].get("stck_clpr", 0)
+                present_price = data["output2"][0].get("stck_prpr")
+                if present_price in (None, ""):
+                    present_price = close_price
+
                 price_dict = {
                     "stock_code": stock_code,
                     "date": date_st,
                     "stck_hgpr": data["output2"][0].get("stck_hgpr", 0),
                     "stck_lwpr": data["output2"][0].get("stck_lwpr", 0),
                     "stck_oprc": data["output2"][0].get("stck_oprc", 0),
-                    "stck_clpr": data["output2"][0].get("stck_clpr", 0),
+                    "stck_clpr": close_price,
+                    "stck_prpr": present_price,
                     "eps": data["output1"].get("eps", 0),
                     "pbr": data["output1"].get("pbr", 0),
                     "per": data["output1"].get("per", 0),
@@ -316,7 +336,9 @@ class KISCollector(BaseCollector):
                 if attempt < 2:
                     time.sleep(2**attempt)
                 else:
-                    self.logger.error(f"[{stock_code}] Price query max retries exceeded")
+                    self.logger.error(
+                        f"[{stock_code}] Price query max retries exceeded"
+                    )
                     return None
             except Exception as e:
                 self.logger.error(f"[{stock_code}] Price query unexpected error: {e}")
@@ -373,6 +395,7 @@ class KISCollector(BaseCollector):
                             "stck_lwpr": [0],
                             "stck_oprc": [0],
                             "stck_clpr": [0],
+                            "stck_prpr": [0],
                             "eps": [0],
                             "pbr": [0],
                             "per": [0],
