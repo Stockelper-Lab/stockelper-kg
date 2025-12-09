@@ -62,3 +62,4 @@ tzdata==2025.2
 ujson==5.11.0
 urllib3==2.5.0
 wheel==0.45.1
+openai>=1.0.0

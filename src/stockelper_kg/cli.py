@@ -3,6 +3,7 @@
 import argparse
 import logging
 from datetime import datetime
+from typing import Optional
 
 from tqdm import tqdm
 
@@ -50,10 +51,12 @@ def parse_args():
         help="Use streaming mode with resume capability (recommended)",
     )
     parser.add_argument(
-        "--batch-size",
+        "--max-workers",
         type=int,
-        default=100,
-        help="Batch size for streaming mode (default: 100)",
+        default=None,
+        help="Maximum number of parallel workers. "
+        "If not set, processes sequentially. Recommended: 2-4 to avoid API rate limits. "
+        "(default: None = sequential)",
     )
     parser.add_argument(
         "--no-skip-existing",
@@ -83,7 +86,7 @@ def main(
     date_fn: str,
     env_path: str = ".env",
     streaming: bool = False,
-    batch_size: int = 100,
+    max_workers: Optional[int] = None,
     skip_existing: bool = True,
     update_only: bool = False,
 ):
@@ -94,7 +97,7 @@ def main(
         date_fn: End date in YYYYMMDD format
         env_path: Path to .env file
         streaming: Use streaming mode with resume capability
-        batch_size: Batch size for streaming mode
+        max_workers: Maximum number of parallel workers. If None, processes sequentially
         skip_existing: Skip stocks that already exist in database
         update_only: Only update existing stocks with new dates
     """
@@ -117,8 +120,8 @@ def main(
             date_list=date_list,
             neo4j_client=client,
             env_path=env_path,
-            batch_size=batch_size,
             skip_existing=skip_existing,
+            max_workers=max_workers,
         )
 
         if update_only:
@@ -158,7 +161,7 @@ def cli():
         date_fn=args.date_fn,
         env_path=args.env,
         streaming=args.streaming,
-        batch_size=args.batch_size,
+        max_workers=args.max_workers,
         skip_existing=not args.no_skip_existing,
         update_only=args.update_only,
     )

@@ -1,7 +1,59 @@
 """Date utility functions."""
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
-from typing import List
+from typing import Any, Dict, List, Optional
+
+
+def normalize_date(value: Any) -> Optional[str]:
+    """Normalize input to YYYY-MM-DD string format.
+
+    Handles YYYY-MM-DD, YYYY/MM/DD, YYYYMMDD strings, and other common formats.
+    Returns None if normalization fails or input is empty.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) != 8:
+        return None
+
+    try:
+        return datetime.strptime(digits, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def build_date_properties(value: Any) -> Optional[Dict[str, Any]]:
+    """Build canonical Date node properties from flexible input.
+
+    - Accepts strings like YYYY-MM-DD, YYYY/MM/DD, YYYYMMDD, etc.
+    - Returns a mapping that always includes:
+        - "date": YYYY-MM-DD
+        - "formatted_date": YYYY-MM-DD
+        - "year", "month", "day": integers
+    - Returns None if the input cannot be normalised to a valid date.
+    """
+    canonical = normalize_date(value)
+    if not canonical:
+        return None
+
+    try:
+        dt = datetime.strptime(canonical, "%Y-%m-%d")
+    except ValueError:
+        # Guard against impossible dates that slipped through normalize_date
+        return None
+
+    return {
+        "date": canonical,
+        "formatted_date": canonical,
+        "year": dt.year,
+        "month": dt.month,
+        "day": dt.day,
+    }
 
 
 def get_date_list(date_st: str, date_fn: str) -> List[str]:

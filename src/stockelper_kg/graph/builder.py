@@ -1,18 +1,63 @@
 """Graph database builder."""
 
+from __future__ import annotations
+
+import json
 import logging
-from typing import List
+import math
+from datetime import date as date_cls, datetime as datetime_cls
+from typing import Any, Dict, Iterable, List, Tuple
 
 import pandas as pd
 
 from .client import Neo4jClient
-from .queries import create_competitor_query, create_stock_query
+from .cypher import payload_to_cypher
+from .payload import build_competitor_payload, build_stock_snapshot_payload
+from ..utils.dates import normalize_date
 
 logger = logging.getLogger(__name__)
 
 
 class GraphBuilder:
     """Builds knowledge graph from collected data."""
+
+    COMPANY_FIELDS: Tuple[str, ...] = (
+        "stock_code",
+        "stock_nm",
+        "stock_abbrv",
+        "stock_nm_eng",
+        "listing_dt",
+        "market_nm",
+        "outstanding_shares",
+        "kospi200_item_yn",
+        "capital_stock",
+        "corp_code",
+        "corp_name",
+        "corp_cls",
+        "std_idst_clsf_cd_name",
+    )
+    PRICE_FIELDS: Tuple[str, ...] = (
+        "stock_code",
+        "stck_hgpr",
+        "stck_lwpr",
+        "stck_oprc",
+        "stck_clpr",
+        "stck_prpr",
+    )
+    FINANCIAL_FIELDS: Tuple[str, ...] = (
+        "stock_code",
+        "revenue",
+        "operating_income",
+        "net_income",
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "capital_stock",
+        "year",
+        "quarter",
+        "reported_date",
+    )
+    INDICATOR_FIELDS: Tuple[str, ...] = ("stock_code", "eps", "pbr", "per")
 
     def __init__(self, client: Neo4jClient):
         """Initialize graph builder.
@@ -25,41 +70,66 @@ class GraphBuilder:
     def build_stock_data(
         self, graph_df: pd.DataFrame, stock_code: str, dates: List[str]
     ) -> List[str]:
-        """Build Cypher queries for stock data.
-
-        Args:
-            graph_df: DataFrame with all collected data
-            stock_code: Stock code to build data for
-            dates: List of dates to build data for
-
-        Returns:
-            List of Cypher queries
-        """
-        queries = []
+        """Build Cypher queries for stock data."""
+        queries: List[str] = []
         filter_df = graph_df[graph_df["stock_code"] == stock_code]
 
         if filter_df.empty:
             logger.warning(f"No data found for stock_code: {stock_code}")
             return queries
 
-        company_dict = filter_df.iloc[0].to_dict()
+        base_record = filter_df.iloc[0].to_dict()
+        company_props = self._prepare_company_properties(base_record)
+        financials = self._extract_financials(base_record)
 
-        for date in dates:
+        normalized_dates = [d for d in (normalize_date(value) for value in dates) if d]
+        if not normalized_dates:
+            logger.warning(
+                "No valid dates supplied for %s; skipping snapshot generation",
+                stock_code,
+            )
+            return queries
+
+        if "date" not in filter_df.columns:
+            logger.warning(
+                "Input dataframe for %s has no 'date' column; cannot align price data",
+                stock_code,
+            )
+            return queries
+
+        normalized_date_series = filter_df["date"].apply(normalize_date)
+
+        for date in normalized_dates:
             try:
-                date_df = filter_df[filter_df["date"] == date]
+                date_df = filter_df[normalized_date_series == date]
                 if date_df.empty:
                     logger.warning(
-                        f"No data for {company_dict.get('stock_nm', stock_code)} "
+                        f"No data for {company_props.get('stock_nm', stock_code)} "
                         f"({stock_code}) on date {date}"
                     )
                     continue
 
-                stock_price_dict = date_df.iloc[0].to_dict()
-                query = create_stock_query(date, company_dict, stock_price_dict)
-                queries.append(query)
-            except Exception as e:
+                snapshot_record = date_df.iloc[0].to_dict()
+                stock_price = self._select_fields(snapshot_record, self.PRICE_FIELDS)
+                stock_price.setdefault("stock_code", stock_code)
+                stock_price["traded_at"] = date
+                stock_price["date"] = date
+                stock_price = self._align_price_fields(stock_price)
+
+                indicators = self._extract_indicators(snapshot_record, date)
+                fs_snapshot = self._prepare_financial_snapshot(financials, date)
+
+                payload = build_stock_snapshot_payload(
+                    company=company_props,
+                    date=date,
+                    stock_price=stock_price,
+                    financials=fs_snapshot,
+                    indicators=indicators,
+                )
+                queries.append(payload_to_cypher(payload))
+            except Exception as exc:
                 logger.error(
-                    f"Error creating stock query for {stock_code} on {date}: {e}"
+                    f"Error creating stock payload for {stock_code} on {date}: {exc}"
                 )
 
         return queries
@@ -67,71 +137,187 @@ class GraphBuilder:
     def build_competitor_data(
         self, graph_df: pd.DataFrame, stock_code: str
     ) -> List[str]:
-        """Build Cypher queries for competitor relationships.
-
-        Args:
-            graph_df: DataFrame with all collected data
-            stock_code: Stock code to build competitor data for
-
-        Returns:
-            List of Cypher queries
-        """
-        queries = []
+        """Build Cypher queries for competitor relationships."""
+        queries: List[str] = []
 
         try:
             src_df = graph_df[graph_df["stock_code"] == stock_code]
             if src_df.empty:
                 return queries
 
-            src_company_dict = src_df.iloc[0].to_dict()
-            compete_code_list = src_df["compete_code_li"].values[0]
+            src_company = self._prepare_company_properties(src_df.iloc[0].to_dict())
+            compete_code_list = self._extract_competitors(src_df)
 
             if not compete_code_list:
                 return queries
 
-            for compete_stock_code in compete_code_list:
-                # Skip self-reference
-                if stock_code == compete_stock_code:
+            for target_code in compete_code_list:
+                if stock_code == target_code:
                     continue
 
-                dst_df = graph_df[graph_df["stock_code"] == compete_stock_code]
+                dst_df = graph_df[graph_df["stock_code"] == target_code]
                 if dst_df.empty:
-                    logger.warning(
-                        f"Competitor {compete_stock_code} not found in data"
-                    )
+                    logger.warning(f"Competitor {target_code} not found in data")
                     continue
 
-                dst_company_dict = dst_df.iloc[0].to_dict()
-                query = create_competitor_query(src_company_dict, dst_company_dict)
-                queries.append(query)
+                dst_company = self._prepare_company_properties(dst_df.iloc[0].to_dict())
 
-        except Exception as e:
-            logger.error(f"Error creating competitor queries for {stock_code}: {e}")
+                payload = build_competitor_payload(src_company, dst_company)
+                queries.append(payload_to_cypher(payload))
+
+        except Exception as exc:
+            logger.error(f"Error creating competitor queries for {stock_code}: {exc}")
 
         return queries
 
     def build_graph(self, graph_df: pd.DataFrame, stock_code: str, dates: List[str]):
-        """Build complete graph for a stock.
-
-        Args:
-            graph_df: DataFrame with all collected data
-            stock_code: Stock code to build graph for
-            dates: List of dates to build data for
-        """
+        """Build complete graph for a stock."""
         try:
             queries = []
+            queries.extend(self.build_stock_data(graph_df, stock_code, dates))
+            queries.extend(self.build_competitor_data(graph_df, stock_code))
 
-            # Build stock data queries
-            stock_queries = self.build_stock_data(graph_df, stock_code, dates)
-            queries.extend(stock_queries)
-
-            # Build competitor queries
-            competitor_queries = self.build_competitor_data(graph_df, stock_code)
-            queries.extend(competitor_queries)
-
-            # Execute all queries in single transaction
             if queries:
                 self.client.execute_queries(queries)
 
-        except Exception as e:
-            logger.error(f"Error building graph for {stock_code}: {e}")
+        except Exception as exc:
+            logger.error(f"Error building graph for {stock_code}: {exc}")
+
+    def _select_fields(
+        self, record: Dict[str, Any], fields: Iterable[str]
+    ) -> Dict[str, Any]:
+        """Select and sanitise a subset of fields from a record."""
+        result: Dict[str, Any] = {}
+        for key in fields:
+            if key not in record:
+                continue
+            value = self._normalise_value(record[key])
+            if value is None:
+                continue
+            result[key] = value
+        return result
+
+    def _prepare_company_properties(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure Company nodes carry consistent identity properties."""
+        props = self._select_fields(record, self.COMPANY_FIELDS)
+        candidates = (
+            props.get("corp_name"),
+            record.get("corp_name"),
+            props.get("stock_nm"),
+            record.get("stock_nm"),
+            props.get("stock_abbrv"),
+            record.get("stock_abbrv"),
+        )
+        fallback_name = next((val for val in candidates if val), None)
+        normalised_name = self._normalise_value(fallback_name)
+        if normalised_name:
+            props.setdefault("corp_name", normalised_name)
+            props.setdefault("stock_nm", normalised_name)
+        return props
+
+    def _align_price_fields(self, price: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure both legacy and canonical price keys are present."""
+        if "stck_prpr" not in price and (close := price.get("stck_clpr")) is not None:
+            price["stck_prpr"] = close
+        if "stck_clpr" not in price and (present := price.get("stck_prpr")) is not None:
+            price["stck_clpr"] = present
+        return price
+
+    def _normalise_value(self, value: Any) -> Any:
+        """Normalise pandas/numpy-friendly values into JSON-safe scalars."""
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        if isinstance(value, pd.Timestamp):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, (datetime_cls, date_cls)):
+            return value.isoformat()
+        if hasattr(value, "item") and not isinstance(value, (bytes, str)):
+            try:
+                return value.item()
+            except Exception:
+                pass
+        if isinstance(value, (pd.Series, pd.DataFrame)):
+            return None
+        return value
+
+    def _extract_financials(self, record: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Extract financial statement properties."""
+        data = self._select_fields(record, self.FINANCIAL_FIELDS)
+        if not data:
+            return None
+
+        if "stock_code" not in data and record.get("stock_code"):
+            data["stock_code"] = self._normalise_value(record["stock_code"])
+
+        fiscal_year = data.pop("year", None)
+        fiscal_period = data.pop("quarter", None)
+        if fiscal_year is not None:
+            data["fiscal_year"] = fiscal_year
+        if fiscal_period is not None:
+            data["fiscal_period"] = str(fiscal_period)
+        return data
+
+    def _extract_indicators(
+        self, record: Dict[str, Any], as_of: str
+    ) -> Dict[str, Any] | None:
+        """Extract indicator metrics for the given snapshot."""
+        data = self._select_fields(record, self.INDICATOR_FIELDS)
+        if not data:
+            return None
+        if "stock_code" not in data and record.get("stock_code"):
+            data["stock_code"] = self._normalise_value(record["stock_code"])
+        canonical = normalize_date(as_of)
+        if canonical:
+            data["as_of"] = canonical
+            data["date"] = canonical
+        return data
+
+    def _extract_competitors(self, df: pd.DataFrame) -> List[str]:
+        """Return a normalised list of competitor stock codes."""
+        if df.empty or "compete_code_li" not in df.columns:
+            return []
+
+        raw_value = df["compete_code_li"].iloc[0]
+
+        # Handle None/NaN
+        if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+            return []
+
+        # Already a list
+        if isinstance(raw_value, list):
+            return [str(code).strip() for code in raw_value if code]
+
+        # JSON string -> list
+        if isinstance(raw_value, str):
+            try:
+                parsed = json.loads(raw_value)
+                if isinstance(parsed, list):
+                    return [str(code).strip() for code in parsed if code]
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return []
+
+    def _prepare_financial_snapshot(
+        self, financials: Dict[str, Any] | None, as_of: str
+    ) -> Dict[str, Any] | None:
+        """Attach a reporting date to financial statements per snapshot."""
+        if not financials:
+            return None
+        snapshot = dict(financials)
+        explicit_reported = normalize_date(snapshot.get("reported_date"))
+        canonical_as_of = normalize_date(as_of)
+        reported = explicit_reported or canonical_as_of
+        if reported:
+            snapshot["reported_date"] = reported
+        effective_date = snapshot.get("reported_date") or canonical_as_of
+        if effective_date:
+            snapshot["date"] = effective_date
+        return snapshot

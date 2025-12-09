@@ -63,5 +63,7 @@ class KRXCollector(BaseCollector):
             }
         )
 
+        df["corp_name"] = df["stock_nm"]
+
         self.logger.info(f"Collected {len(df)} companies from KRX")
         return df

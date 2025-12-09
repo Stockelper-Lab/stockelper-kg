@@ -1,11 +1,11 @@
-"""Data collection orchestrator."""
+"""Legacy batch data collection orchestrator."""
 
 import logging
+from typing import List
 
 import pandas as pd
 
 from ..config import Config
-from ..utils import measure_time
 from .dart import DartCollector
 from .kis import KISCollector
 from .krx import KRXCollector
@@ -15,9 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class DataOrchestrator:
-    """Orchestrates data collection from multiple sources."""
+    """Orchestrates batch data collection (legacy mode).
 
-    def __init__(self, config: Config, date_list: list, env_path: str = ".env"):
+    This class collects all data for all stocks in batch mode,
+    then returns a merged DataFrame for graph building.
+    """
+
+    def __init__(self, config: Config, date_list: List[str], env_path: str = ".env"):
         """Initialize data orchestrator.
 
         Args:
@@ -27,87 +31,65 @@ class DataOrchestrator:
         """
         self.config = config
         self.date_list = date_list
+        self.env_path = env_path
+
+        # Initialize collectors
         self.krx_collector = KRXCollector(config.sleep_seconds)
         self.kis_collector = KISCollector(config.kis, config.sleep_seconds, env_path)
         self.dart_collector = DartCollector(config.dart_api_key, config.sleep_seconds)
         self.mongodb_collector = MongoDBCollector(config.mongodb)
 
-        self.company_df = None
-        self.price_df = None
-        self.competitor_df = None
-        self.fs_df = None
-        self.total_df = None
-
-    @measure_time
-    def collect_company_info(self):
-        """Collect company information from KRX and KIS."""
-        logger.info("[1. Collecting company info...]")
-        company_df_krx = self.krx_collector.collect()
-        stock_codes = company_df_krx["stock_code"].tolist()
-
-        company_df_kis, _ = self.kis_collector.collect(stock_codes, [])
-        self.company_df = pd.merge(
-            company_df_krx, company_df_kis, how="left", on="stock_code"
-        )
-
-    @measure_time
-    def collect_price_info(self):
-        """Collect price and indicator information."""
-        logger.info("[2. Collecting price info...]")
-        stock_codes = self.company_df["stock_code"].tolist()
-        _, self.price_df = self.kis_collector.collect(stock_codes, self.date_list)
-
-    @measure_time
-    def collect_competitor_info(self):
-        """Collect competitor information from MongoDB."""
-        logger.info("[3. Collecting competitor info...]")
-        self.competitor_df = self.mongodb_collector.collect()
-
-        stock_codes = self.company_df["stock_code"].tolist()
-        existing_stock_codes = (
-            set(self.competitor_df["stock_code"])
-            if not self.competitor_df.empty
-            else set()
-        )
-
-        missing_stock_codes = set(stock_codes) - existing_stock_codes
-        for stock_code in missing_stock_codes:
-            missing_row = pd.DataFrame(
-                {"stock_code": [stock_code], "compete_code_li": [[]]}
-            )
-            self.competitor_df = pd.concat(
-                [self.competitor_df, missing_row], ignore_index=True
-            )
-
-    @measure_time
-    def collect_financial_statements(self):
-        """Collect financial statement information."""
-        logger.info("[4. Collecting financial statements...]")
-        stock_codes = self.company_df["stock_code"].tolist()
-        date = self.date_list[0]
-        self.fs_df = self.dart_collector.collect(stock_codes, date)
-
-    def create_total_df(self) -> pd.DataFrame:
-        """Merge all collected data into single DataFrame.
-
-        Returns:
-            Combined DataFrame with all data
-        """
-        logger.info("[5. Creating total DataFrame...]")
-        self.total_df = pd.merge(self.company_df, self.price_df, on="stock_code", how="left")
-        self.total_df = pd.merge(self.total_df, self.competitor_df, on="stock_code", how="left")
-        self.total_df = pd.merge(self.total_df, self.fs_df, on="stock_code", how="left")
-        return self.total_df
-
-    @measure_time
     def run_all(self) -> pd.DataFrame:
-        """Run all data collection steps.
+        """Collect all data for all stocks and return merged DataFrame.
 
         Returns:
-            Combined DataFrame with all collected data
+            Merged DataFrame with all stock data
         """
-        self.collect_company_info()
-        self.collect_price_info()
-        self.collect_competitor_info()
-        self.collect_financial_statements()
-        return self.create_total_df()
+        logger.info("[orchestrator] Start batch data collection (legacy mode)")
+
+        # Step 1: Collect static data (company info and competitors)
+        logger.info("[1/4] Collecting static data (company + competitors)")
+        company_df_krx = self.krx_collector.collect()
+        logger.info(
+            "[1/4] Collected company info from KRX: %d companies", len(company_df_krx)
+        )
+
+        competitor_df = self.mongodb_collector.collect()
+        logger.info("[1/4] Collected competitor data from MongoDB")
+
+        # Merge company and competitor data
+        static_df = pd.merge(company_df_krx, competitor_df, on="stock_code", how="left")
+        static_df["compete_code_li"] = static_df["compete_code_li"].apply(
+            lambda x: x if isinstance(x, list) else []
+        )
+
+        # Step 2: Get all stock codes
+        all_stock_codes = static_df["stock_code"].tolist()
+        logger.info("[orchestrator] Total stocks to process: %d", len(all_stock_codes))
+
+        # Step 3: Collect KIS data (company info + price) for all stocks
+        logger.info("[2/4] Collecting KIS data (company info + price)")
+        company_df_kis, price_df = self.kis_collector.collect(
+            all_stock_codes, self.date_list
+        )
+        logger.info(
+            "[2/4] Collected KIS company data: %d companies", len(company_df_kis)
+        )
+
+        # Step 4: Collect financial statements for all stocks
+        logger.info("[3/4] Collecting financial statements from DART")
+        fs_df = self.dart_collector.collect(all_stock_codes, self.date_list[0])
+        logger.info("[3/4] Collected financial statements: %d companies", len(fs_df))
+
+        # Step 5: Merge all data
+        logger.info("[4/4] Merging all data")
+        result = pd.merge(static_df, company_df_kis, on="stock_code", how="left")
+        result = pd.merge(result, price_df, on="stock_code", how="left")
+        result = pd.merge(result, fs_df, on="stock_code", how="left")
+
+        logger.info(
+            "[orchestrator] Batch data collection completed, final rows: %d",
+            len(result),
+        )
+
+        return result
