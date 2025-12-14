@@ -73,10 +73,9 @@ class GraphBuilder:
         """Build Cypher queries for stock data."""
         queries: List[str] = []
         filter_df = graph_df[graph_df["stock_code"] == stock_code]
-
         if filter_df.empty:
             logger.warning(f"No data found for stock_code: {stock_code}")
-            return queries
+            return []
 
         base_record = filter_df.iloc[0].to_dict()
         company_props = self._prepare_company_properties(base_record)
