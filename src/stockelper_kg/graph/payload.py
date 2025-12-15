@@ -36,6 +36,10 @@ def build_graph_payload(
         if isinstance(data, dict):
             slots.update(data)
 
+    sentiment_score = event_data.get("sentiment_score")
+    if sentiment_score is not None:
+        slots["sentiment_score"] = sentiment_score
+
     missing = [s for s in definition.required_slots if not _has_value(slots.get(s))]
     if missing:
         raise ValueError(f"Missing required slots: {', '.join(missing)}")
@@ -83,24 +87,24 @@ def build_stock_snapshot_payload(
         context.add_edge("RECORDED_ON", stock_node.key, price_date.key)
 
     if financials:
-        fs_node = context.add_node("FinancialStatements", financials)
+        fs_date_value = (
+            financials.get("reported_date") or financials.get("date") or date
+        )
+        fs_props = {**financials, "date": fs_date_value}
+        fs_node = context.add_node("FinancialStatements", fs_props)
         context.add_edge("HAS_FINANCIAL_STATEMENTS", company_node.key, fs_node.key)
         if fs_date := _attach_typed_date_node(
-            context,
-            "FinancialDate",
-            financials.get("reported_date") or financials.get("date") or date,
-            company_node=company_node,
+            context, "FinancialDate", fs_date_value, company_node=company_node
         ):
             context.add_edge("REPORTED_ON", fs_node.key, fs_date.key)
 
     if indicators:
-        indicator_node = context.add_node("Indicator", indicators)
+        indicator_date = indicators.get("as_of") or indicators.get("date") or date
+        indicator_props = {**indicators, "date": indicator_date}
+        indicator_node = context.add_node("Indicator", indicator_props)
         context.add_edge("HAS_INDICATOR", company_node.key, indicator_node.key)
         if ind_date := _attach_typed_date_node(
-            context,
-            "IndicatorDate",
-            indicators.get("as_of") or indicators.get("date") or date,
-            company_node=company_node,
+            context, "IndicatorDate", indicator_date, company_node=company_node
         ):
             context.add_edge("MEASURED_ON", indicator_node.key, ind_date.key)
 
@@ -148,7 +152,7 @@ def _extract_document_info(
 
     if "document_id" not in cleaned:
         for key in ("rcept_no", "url", "title"):
-            if cleaned.get(key):
+            if key in cleaned:
                 cleaned["document_id"] = cleaned[key]
                 break
     return cleaned
@@ -179,15 +183,21 @@ def _build_event_graph(
 ) -> GraphPayload:
     context = GraphBuildContext()
 
-    company_node = context.add_node("Company", {
-        "corp_name": corp_name,
-        "stock_nm": corp_name,
-        "corp_code": slots.get("corp_code"),
-        "stock_code": slots.get("stock_code"),
-    })
+    company_node = context.add_node(
+        "Company",
+        {
+            "corp_name": corp_name,
+            "stock_nm": corp_name,
+            "corp_code": slots.get("corp_code"),
+            "stock_code": slots.get("stock_code"),
+        },
+    )
 
-    event_props = {**{k: v for k, v in slots.items() if k != "date"}, "type": event_type}
-    event_props["summary"] = summary.strip() if summary else ""
+    event_props = {
+        **{k: v for k, v in slots.items() if k != "date"},
+        "type": event_type,
+        "summary": summary.strip() if summary else "",
+    }
     event_node = context.add_node("Event", event_props)
     context.add_edge("INVOLVED_IN", company_node.key, event_node.key)
 
