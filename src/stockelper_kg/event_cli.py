@@ -109,8 +109,9 @@ def _run_pipeline(
             total_events = len(event_results)
             for event_idx, event_data in enumerate(event_results, start=1):
                 event_type = event_data.get("event_type", "UNKNOWN")
-                corps = event_data.get("corp_names") or [event_data.get("corp_name")]
-                corp_label = ", ".join([c for c in corps if c]) or "UNKNOWN"
+                corps = event_data.get("corp_names")
+                corps_list = corps if isinstance(corps, list) else []
+                corp_label = ", ".join([c for c in corps_list if c]) or "UNKNOWN"
                 logger.info(
                     "[%s] ✓ event %d/%d type=%s corps=%s",
                     item.identifier,
@@ -126,7 +127,7 @@ def _run_pipeline(
                         "event_index": event_idx,
                         "event_count": total_events,
                         "event_type": event_type,
-                        "corps": corps,
+                        "corps": corps_list,
                         "metadata": item.metadata,
                         "result": event_data,
                     }

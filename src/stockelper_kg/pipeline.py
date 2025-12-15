@@ -17,7 +17,6 @@ from .graph.ontology import ONTOLOGY
 from .graph.payload import (
     build_graph_payload,
     _autofill_counterparty,
-    _generate_event_id,
     _identity_keys_for,
     _normalize_corp_names,
 )
@@ -84,7 +83,6 @@ class EventPipeline:
     ) -> list[EventResult]:
         logger.info("Analyzing event...")
         events = classify_events(text)
-        events = self._dedupe_events(events)
         results: list[EventResult] = []
 
         for event_data in events:
@@ -103,20 +101,20 @@ class EventPipeline:
         if not isinstance(event_data.get("optional_slots"), dict):
             event_data["optional_slots"] = {}
 
-        corp_names = _normalize_corp_names(event_data, slots)
+        corp_names = _normalize_corp_names(
+            event_data.get("corp_names")
+            if isinstance(event_data.get("corp_names"), list)
+            else []
+        )
         if not corp_names and metadata:
-            meta = metadata.get("corp_names") or metadata.get("corp_name")
+            meta = metadata.get("corp_names")
             if isinstance(meta, list):
                 corp_names = [str(n).strip() for n in meta if str(n).strip()]
-            elif isinstance(meta, str) and meta.strip():
-                corp_names = [meta.strip()]
 
         if not corp_names:
-            raise ValueError("corp_name is required")
+            raise ValueError("corp_names is required")
 
-        corp_name = corp_names[0]
         event_data["corp_names"] = slots["corp_names"] = corp_names
-        event_data["corp_name"] = slots["corp_name"] = corp_name
 
         date = slots.get("date") or event_data.get("date")
         if date and (normalized := normalize_date(date)):
@@ -152,12 +150,11 @@ class EventPipeline:
         ]
         if missing:
             missing_str = ", ".join(missing)
-            corp_label = ", ".join(corp_names) if corp_names else "UNKNOWN"
-            summary_snippet = (event_data.get("summary") or "").strip()
             context = (
-                f"event_type={event_data.get('event_type')}, corp_names={corp_label}"
+                f"event_type={event_data.get('event_type')}, "
+                f"corp_names={', '.join(corp_names) if corp_names else 'UNKNOWN'}"
             )
-            if summary_snippet:
+            if summary_snippet := (event_data.get("summary") or "").strip():
                 context = f"{context}, summary={summary_snippet[:120]}"
             raise ValueError(f"Missing required slots: {missing_str} ({context})")
 
@@ -168,46 +165,6 @@ class EventPipeline:
             date=slots.get("date"),
         )
 
-    def _dedupe_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        # TODO: Behavior Change - drop duplicate events using generated event_id
-        seen: set[str] = set()
-        deduped: list[dict[str, Any]] = []
-        for event in events:
-            slots = (
-                event.get("required_slots")
-                if isinstance(event.get("required_slots"), dict)
-                else {}
-            )
-            corp_names = event.get("corp_names") or [event.get("corp_name")]
-            if isinstance(corp_names, list):
-                corp_names = [corp for corp in corp_names if corp]
-            else:
-                corp_names = [corp_names] if corp_names else []
-            event_type = event.get("event_type")
-            date = slots.get("date") or event.get("date")
-            if not (corp_names and event_type and date):
-                deduped.append(event)
-                continue
-            event_id = _generate_event_id(
-                corp_names,
-                event_type,
-                date,
-                event.get("summary", ""),
-                None,
-                slots,
-            )
-            if event_id in seen:
-                logger.info(
-                    "Dropping duplicate event: %s | %s | %s",
-                    event_type,
-                    corp_names[0],
-                    date,
-                )
-                continue
-            seen.add(event_id)
-            deduped.append(event)
-        return deduped
-
     def _save_events_batch(
         self,
         results: list[EventResult],
@@ -217,15 +174,16 @@ class EventPipeline:
         from .graph.payload import build_multi_event_payload
 
         events_data = [r.event_data for r in results]
-        first_names = [
-            r.event_data.get("corp_names", [r.event_data.get("corp_name", "")])[0]
-            for r in results[:3]
-        ]
+        first_names: list[str] = []
+        for result in results[:3]:
+            corp_names = result.event_data.get("corp_names")
+            if isinstance(corp_names, list) and corp_names:
+                first_names.append(corp_names[0])
         corp_label = ", ".join(first_names)
         if len(results) > 3:
             corp_label += f" ... (+{len(results) - 3} more)"
 
-        logger.info("[%s] Saving %d event(s) in batch...", corp_label, len(results))
+        logger.info(f"[{corp_label}] Saving {len(results)} event(s) in batch...")
         payload = build_multi_event_payload(events_data, metadata=metadata)
         self.client.execute_query(payload_to_cypher(payload))
 
@@ -235,9 +193,13 @@ class EventPipeline:
         metadata: dict[str, Any] | None,
         shared_doc_node=None,
     ) -> None:
-        corp_names = event_data.get("corp_names") or [event_data.get("corp_name")]
-        corp_label = ", ".join(c for c in corp_names if c) or "UNKNOWN"
-        logger.info("[%s] Saving event graph...", corp_label)
+        corp_names = event_data.get("corp_names")
+        corp_label = (
+            ", ".join(c for c in corp_names if c)
+            if isinstance(corp_names, list)
+            else "UNKNOWN"
+        )
+        logger.info(f"[{corp_label}] Saving event graph...")
         payload = build_graph_payload(
             event_data, metadata=metadata, shared_doc_node=shared_doc_node
         )
@@ -274,17 +236,17 @@ class EventPipeline:
         self, stock_code: str, date: str, corp_name: str | None = None
     ) -> None:
         label = corp_name or stock_code
-        logger.info("[%s] Collecting company data...", label)
+        logger.info(f"[{label}] Collecting company data...")
         try:
             df = self.collector.collect(stock_code, date)
             if df.empty:
-                logger.warning("[%s] No data collected", label)
+                logger.warning(f"[{label}] No data collected")
                 return
 
             self.graph_builder.build_graph(df, stock_code, [date])
-            logger.info("[%s] Graph updated", label)
+            logger.info(f"[{label}] Graph updated")
         except Exception as e:
-            logger.error("[%s] Failed to update company graph: %s", label, e)
+            logger.error(f"[{label}] Failed to update company graph: {e}")
 
 
 def create_pipeline(config: Config) -> EventPipeline:

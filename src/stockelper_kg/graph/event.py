@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from .ontology import ONTOLOGY, build_ontology_prompts
+from .payload import _normalize_corp_names
 
 load_dotenv()
 
@@ -130,27 +131,16 @@ def _normalize_event_dict(raw: dict[str, Any], idx: int) -> dict[str, Any]:
         etype = "OTHER"
     data["event_type"] = etype
 
-    corp_names: list[str] = []
-    for candidate in (
+    names: list[str] = []
+    for source in (
         data.get("corp_names"),
-        data.get("corp_name"),
-        data["required_slots"].get("corp_names"),
-        data["required_slots"].get("corp_name"),
-        data["optional_slots"].get("corp_names"),
-        data["optional_slots"].get("corp_name"),
+        data.get("required_slots", {}).get("corp_names"),
+        data.get("optional_slots", {}).get("corp_names"),
     ):
-        if isinstance(candidate, list):
-            corp_names.extend(
-                str(name).strip() for name in candidate if str(name).strip()
-            )
-        elif isinstance(candidate, str) and candidate.strip():
-            corp_names.append(candidate.strip())
-
-    corp_names = list(dict.fromkeys(name for name in corp_names if name))
-    if not corp_names:
-        raise ValueError(f"corp_name is required but missing in event #{idx}")
+        if isinstance(source, list):
+            names.extend(source)
+    corp_names = _normalize_corp_names(names)
     data["corp_names"] = corp_names
-    data["corp_name"] = corp_names[0]
 
     if date := data["required_slots"].get("date"):
         data["date"] = date

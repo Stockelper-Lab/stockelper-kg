@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from typing import Any
 
 from ..utils.dates import build_date_properties, normalize_date
@@ -45,7 +44,7 @@ def build_multi_event_payload(
             )
         except Exception as exc:
             event_type = event_data.get("event_type", "UNKNOWN")
-            corp = event_data.get("corp_names") or event_data.get("corp_name")
+            corp = event_data.get("corp_names")
             label = corp if isinstance(corp, str) else ", ".join(corp or [])
             raise ValueError(
                 f"Failed to build payload for event #{idx} ({event_type} | {label}): {exc}"
@@ -80,26 +79,24 @@ def build_graph_payload(
         if isinstance(data, dict):
             slots.update(data)
 
+    summary_text = event_data.get("summary", "")
     sentiment_score = event_data.get("sentiment_score")
     if sentiment_score is not None:
         slots["sentiment_score"] = sentiment_score
 
-    corp_names = _normalize_corp_names(event_data, slots)
-    if not corp_names:
-        raise ValueError("corp_name is required")
-    slots["corp_names"] = corp_names
-    slots["corp_name"] = corp_names[0]
+    corp_names_raw = event_data.get("corp_names")
+    if not isinstance(corp_names_raw, list):
+        raise ValueError("corp_names must be a list")
+    corp_names = _normalize_corp_names(corp_names_raw)
     event_data["corp_names"] = corp_names
-    event_data["corp_name"] = corp_names[0]
 
-    # TODO: Behavior Change - auto-fill counterparty from corp_names when missing
     _autofill_counterparty(definition, slots, corp_names)
 
     missing = [s for s in definition.required_slots if not _has_value(slots.get(s))]
     if missing:
         missing_str = ", ".join(missing)
-        corp_label = ", ".join(corp_names) if corp_names else "UNKNOWN"
-        summary_snippet = (event_data.get("summary") or "").strip()
+        corp_label = ", ".join(corp_names)
+        summary_snippet = (summary_text or "").strip()
         context = f"event_type={event_type}, corp_names={corp_label}"
         if summary_snippet:
             context = f"{context}, summary={summary_snippet[:120]}"
@@ -116,7 +113,7 @@ def build_graph_payload(
         corp_names,
         event_type,
         slots.get("date"),
-        event_data.get("summary", ""),
+        summary_text,
         doc_info,
         slots,
     )
@@ -125,7 +122,7 @@ def build_graph_payload(
         corp_names,
         event_type,
         slots,
-        event_data.get("summary", ""),
+        summary_text,
         doc_info,
         shared_doc_node,
     )
@@ -237,7 +234,7 @@ def extract_document_info(
     if "document_id" not in cleaned:
         for key in ("rcept_no", "url", "title"):
             value = cleaned.get(key)
-            if _has_value(value) and isinstance(value, str) and value.strip():
+            if _has_value(value) and isinstance(value, str):
                 cleaned["document_id"] = value.strip()
                 break
     return cleaned
@@ -249,20 +246,19 @@ def _generate_event_id(
     date: str | None,
     summary: str | None,
     doc_info: dict[str, Any] | None,
-    slots: dict[str, Any] | None,
+    slots: dict[str, Any],
 ) -> str:
-    participants = ",".join(sorted(set(corp_names))) if corp_names else None
+    participants = ",".join(sorted(set(corp_names)))
     required_slot_fp = ""
     resolved_date = date
-    if isinstance(slots, dict):
-        definition = ONTOLOGY.event_map.get(event_type or "")
-        required_keys = definition.required_slots if definition else ()
-        required_values = {
-            key: slots.get(key) for key in required_keys if _has_value(slots.get(key))
-        }
-        if required_values:
-            required_slot_fp = _fingerprint(required_values)
-            resolved_date = required_values.get("date") or resolved_date
+    definition = ONTOLOGY.event_map.get(event_type or "")
+    required_keys = definition.required_slots if definition else ()
+    required_values = {
+        key: slots.get(key) for key in required_keys if _has_value(slots.get(key))
+    }
+    if required_values:
+        required_slot_fp = _fingerprint(required_values)
+        resolved_date = required_values.get("date") or resolved_date
 
     parts = [
         part
@@ -274,8 +270,6 @@ def _generate_event_id(
         )
         if part
     ]
-    if not parts:
-        parts = [f"EVT_{uuid.uuid4().hex[:12].upper()}"]
     content = "::".join(parts)
     digest = hashlib.sha1(content.encode()).hexdigest()
     return f"EVT_{digest[:12].upper()}"
@@ -306,18 +300,24 @@ def _build_event_graph(
     }
     event_node = context.add_node("Event", event_props, _identity_keys_for("Event"))
 
-    for idx, corp_name in enumerate(corp_names):
+    for corp_name in corp_names:
+        corp_code = (
+            corp_codes.get(corp_name)
+            if isinstance(corp_codes, dict)
+            else slots.get("corp_code")
+        )
+        stock_code = (
+            stock_codes.get(corp_name)
+            if isinstance(stock_codes, dict)
+            else slots.get("stock_code")
+        )
         company_node = context.add_node(
             "Company",
             {
                 "corp_name": corp_name,
                 "stock_nm": corp_name,
-                "corp_code": _resolve_company_value(
-                    corp_codes, slots.get("corp_code"), corp_name, idx, corp_names
-                ),
-                "stock_code": _resolve_company_value(
-                    stock_codes, slots.get("stock_code"), corp_name, idx, corp_names
-                ),
+                "corp_code": corp_code,
+                "stock_code": stock_code,
             },
             _identity_keys_for("Company"),
         )
@@ -348,43 +348,24 @@ def _normalize_stock_price(props: dict[str, Any]) -> dict[str, Any]:
     return props
 
 
-def _normalize_corp_names(
-    event_data: dict[str, Any],
-    slots: dict[str, Any],
-) -> list[str]:
-    names: list[str] = []
-    for source in (
-        event_data.get("corp_names"),
-        slots.get("corp_names"),
-        event_data.get("corp_name"),
-        slots.get("corp_name"),
-    ):
-        if isinstance(source, list):
-            names.extend(source)
-        elif isinstance(source, str):
-            names.append(source)
-    return [
-        name
-        for name in dict.fromkeys(
-            name.strip() for name in names if isinstance(name, str)
-        )
-        if name
-    ]
+def _normalize_corp_names(names: list[str]) -> list[str]:
+    corp_names = list(dict.fromkeys(n.strip() for n in names if n.strip()))
+    if not corp_names:
+        raise ValueError("corp_names is required")
+    return corp_names
 
 
 def _autofill_counterparty(
     definition: EventDefinition, slots: dict[str, Any], corp_names: list[str]
 ) -> None:
-    if "counterparty" not in definition.required_slots:
-        return
-    if _has_value(slots.get("counterparty")):
-        return
-    if len(corp_names) < 2:
+    if (
+        "counterparty" not in definition.required_slots
+        or _has_value(slots.get("counterparty"))
+        or len(corp_names) < 2
+    ):
         return
 
-    counterparts = [name for name in corp_names[1:] if name]
-    if not counterparts:
-        return
+    counterparts = corp_names[1:]
     slots["counterparty"] = counterparts if len(counterparts) > 1 else counterparts[0]
 
 
@@ -405,26 +386,6 @@ def _attach_typed_date_node(
     typed_date = context.add_node(label, date_props, _identity_keys_for(label))
     context.add_edge("IS_DATE", typed_date.key, hub_date.key)
     return typed_date
-
-
-def _resolve_company_value(
-    mapping: Any,
-    shared_value: Any,
-    corp_name: str,
-    position: int | None = None,
-    corp_names: list[str] | None = None,
-) -> Any:
-    if isinstance(mapping, dict) and corp_name in mapping:
-        return mapping.get(corp_name)
-    if isinstance(mapping, (list, tuple)) and position is not None:
-        return mapping[position] if position < len(mapping) else None
-    if isinstance(mapping, (list, tuple)) and corp_names:
-        try:
-            idx = corp_names.index(corp_name)
-        except ValueError:
-            idx = None
-        return mapping[idx] if idx is not None and idx < len(mapping) else None
-    return shared_value
 
 
 def _identity_keys_for(label: str) -> tuple[str, ...]:
