@@ -17,26 +17,22 @@ client = OpenAI()
 logger = logging.getLogger(__name__)
 
 
-def classify_event(event: str, model: str = "gpt-4o-mini") -> dict[str, Any]:
-    event_text = event.strip() if event else ""
-    if not event_text:
+def classify_events(text: str, model: str = "gpt-4o-mini") -> list[dict[str, Any]]:
+    if not text or not text.strip():
         raise ValueError("event text is empty")
 
     ontology = build_ontology_prompts(detail="full")
     event_types = ", ".join(ONTOLOGY.event_map.keys())
 
     system_prompt = f"""You are a financial news event classification expert specializing in Korean stock market news.
-Analyze Korean news/event text to classify into ontology event types, extract structured slots, and calculate sentiment score.
+Detect all distinct financial news/events in the text and extract structured slots.
 
 Task:
-1. Event classification: Classify into one event type from ontology. If multiple events exist, select the most significant one.
-2. Slot extraction:
-   - required_slots: ONLY slots in ontology's "required" list for chosen event_type
-   - optional_slots: Any other relevant information NOT in required list
-3. Sentiment analysis: Calculate sentiment_score between -1.0 (negative) and 1.0 (positive).
-   - Positive: earnings improvement (실적 개선), new contracts (신규 계약), technological innovation (기술 혁신), positive outlook (긍정적 전망), etc.
-   - Negative: earnings deterioration (실적 악화), increased risks (리스크 증가), negative outlook (부정적 전망), regulatory tightening (규제 강화), etc.
-   - Neutral: close to 0
+1) Identify every separate event mentioned (a document may contain multiple events).
+2) For each event, extract ALL participating company names in corp_names (list).
+3) Fill required_slots using ONLY the ontology's required fields for that event_type.
+4) Fill optional_slots with any other factual details.
+5) Calculate sentiment_score between -1.0 (negative) and 1.0 (positive) for each event.
 
 [EVENT ONTOLOGY]
 {json.dumps(ontology["events"], ensure_ascii=False, indent=2)}
@@ -45,20 +41,26 @@ Output must be in JSON format only."""
 
     user_prompt = f"""Analyze the following Korean news/event text.
 
-News information:
-- Text: {event.strip()}
-
 Output only in the following JSON format (no other explanation, JSON only):
 {{
-  "event_type": "<string>",  // One of {event_types}, or "OTHER" if none applies. Must match exactly.
-  "corp_name": "<string>",  // Korean company name exactly as it appears in the text (e.g., "삼성전자"). Use null if not mentioned.
-  "required_slots": {{ "<slot_name>": "<value>", ... }},  // ONLY slots in ontology's "required" list for chosen event_type
-  "optional_slots": {{ "<slot_name>": "<value>", ... }},  // Any other relevant info NOT in required list
-  "summary": "<string>",  // Key summary in 1 sentence
-  "sentiment_score": <float>,  // Real number between -1.0 (negative) and 1.0 (positive)
-  "reported_by": "<string>",  // Source identifier (e.g., "DART", "연합뉴스")
-  "reported_at": "<string>"  // Date in YYYY-MM-DD format
+  "events": [
+    {{
+      "event_type": "{event_types} (or OTHER if none applies)",
+      "corp_names": ["Company A", "Company B"],
+      "summary": "Maximum 3 sentence summary for this event only. and explain reason of sentiment score",
+      "required_slots": {{ ONLY slots in ontology's "required" list for chosen event_type}},
+      "optional_slots": {{ "product_id": "...", ... }},
+      "sentiment_score": -1.0(negative) ~ +1.0(positive),
+      "reported_by": "YYYY-MM-DD",
+      "reported_at": "<string>"
+    }}
+  ]
 }}
+- events array MUST NOT be empty. If no clear event, return one OTHER event with best-effort fields.
+- corp_names MUST include every company involved in that event (list, no duplicates).
+
+News information:
+{text.strip()}
 """
 
     resp = client.chat.completions.create(
@@ -69,43 +71,90 @@ Output only in the following JSON format (no other explanation, JSON only):
         ],
         temperature=0,
         response_format={"type": "json_object"},
-        max_tokens=600,
+        max_tokens=1200,
     )
 
-    content = resp.choices[0].message.content
+    events = _parse_events_response(resp.choices[0].message.content)
+    logger.info("Extracted %d event(s)", len(events))
+    return events
+
+
+def _parse_events_response(content: str) -> list[dict[str, Any]]:
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.split("\n")
+        content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
+        content = content.lstrip("json").strip()
+
     try:
-        data = json.loads(content)
+        payload = json.loads(content)
     except json.JSONDecodeError as exc:
+        preview = content[:200] + "..." if len(content) > 200 else content
+        logger.error("Failed to parse JSON. Preview: %s", preview)
         raise ValueError(f"Failed to parse LLM response: {exc}") from exc
 
-    required_slots = data.get("required_slots") or {}
-    optional_slots = data.get("optional_slots") or {}
+    events = payload.get("events") or payload.get("event")
+    if isinstance(events, dict):
+        events = [events]
+    if not isinstance(events, list) or not events:
+        raise ValueError("LLM response did not include any events")
+
+    normalized: list[dict[str, Any]] = []
+    for idx, event in enumerate(events, start=1):
+        if not isinstance(event, dict):
+            raise ValueError(f"Event #{idx} is not an object")
+        normalized.append(_normalize_event_dict(event, idx))
+    return normalized
+
+
+def _normalize_event_dict(raw: dict[str, Any], idx: int) -> dict[str, Any]:
+    data = dict(raw)
+    data["required_slots"] = (
+        data["required_slots"] if isinstance(data.get("required_slots"), dict) else {}
+    )
+    data["optional_slots"] = (
+        data["optional_slots"] if isinstance(data.get("optional_slots"), dict) else {}
+    )
 
     if "sentiment_score" not in data:
-        raise ValueError("sentiment_score is required but not found in LLM response")
+        raise ValueError(f"sentiment_score is required but missing in event #{idx}")
     sentiment_score = float(data["sentiment_score"])
     if not (-1.0 <= sentiment_score <= 1.0):
         raise ValueError(
-            f"sentiment_score must be a number between -1.0 and 1.0, got: {sentiment_score}"
+            f"sentiment_score must be between -1.0 and 1.0, got: {sentiment_score} in event #{idx}"
         )
-
-    event_type = data.get("event_type")
-    if event_type not in ONTOLOGY.event_map:
-        event_type = "OTHER"
-
-    corp_name = (data.get("corp_name") or required_slots.get("corp_name") or "").strip()
-    if not corp_name:
-        raise ValueError("corp_name is required but not found in LLM response")
-    data["corp_name"] = corp_name
-    data["event_type"] = event_type
     data["sentiment_score"] = sentiment_score
-    data["required_slots"] = required_slots
-    data["optional_slots"] = optional_slots
 
-    if date := required_slots.get("date"):
+    etype = (data.get("event_type") or "OTHER").strip().upper()
+    if etype not in ONTOLOGY.event_map:
+        etype = "OTHER"
+    data["event_type"] = etype
+
+    corp_names: list[str] = []
+    for candidate in (
+        data.get("corp_names"),
+        data.get("corp_name"),
+        data["required_slots"].get("corp_names"),
+        data["required_slots"].get("corp_name"),
+        data["optional_slots"].get("corp_names"),
+        data["optional_slots"].get("corp_name"),
+    ):
+        if isinstance(candidate, list):
+            corp_names.extend(
+                str(name).strip() for name in candidate if str(name).strip()
+            )
+        elif isinstance(candidate, str) and candidate.strip():
+            corp_names.append(candidate.strip())
+
+    corp_names = list(dict.fromkeys(name for name in corp_names if name))
+    if not corp_names:
+        raise ValueError(f"corp_name is required but missing in event #{idx}")
+    data["corp_names"] = corp_names
+    data["corp_name"] = corp_names[0]
+
+    if date := data["required_slots"].get("date"):
         data["date"] = date
 
-    logger.info(f"Event: {data}")
     return data
 
 
@@ -118,5 +167,6 @@ if __name__ == "__main__":
     if not path.is_file():
         raise SystemExit(f"File not found: {path}")
 
-    result = classify_event(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    result = classify_events(text)
     print(json.dumps(result, ensure_ascii=False, indent=2))
