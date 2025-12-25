@@ -92,18 +92,46 @@ def _run_pipeline(
     for idx, item in enumerate(items, start=1):
         logger.info("[%d/%d] Processing %s", idx, total, item.identifier)
         try:
-            event_data = pipeline.process(item.text, metadata=item.metadata)
-            event_type = event_data.get("event_type", "UNKNOWN")
-            logger.info("[%s] ✓ event_type=%s", item.identifier, event_type)
-            results.append(
-                {
-                    "source": item.identifier,
-                    "success": True,
-                    "event_type": event_type,
-                    "metadata": item.metadata,
-                    "result": event_data,
-                }
-            )
+            event_results = pipeline.process(item.text, metadata=item.metadata)
+            if not isinstance(event_results, list):
+                event_results = [event_results]
+            if not event_results:
+                results.append(
+                    {
+                        "source": item.identifier,
+                        "success": False,
+                        "metadata": item.metadata,
+                        "error": "No events returned",
+                    }
+                )
+                continue
+
+            total_events = len(event_results)
+            for event_idx, event_data in enumerate(event_results, start=1):
+                event_type = event_data.get("event_type", "UNKNOWN")
+                corps = event_data.get("corp_names")
+                corps_list = corps if isinstance(corps, list) else []
+                corp_label = ", ".join([c for c in corps_list if c]) or "UNKNOWN"
+                logger.info(
+                    "[%s] ✓ event %d/%d type=%s corps=%s",
+                    item.identifier,
+                    event_idx,
+                    total_events,
+                    event_type,
+                    corp_label,
+                )
+                results.append(
+                    {
+                        "source": item.identifier,
+                        "success": True,
+                        "event_index": event_idx,
+                        "event_count": total_events,
+                        "event_type": event_type,
+                        "corps": corps_list,
+                        "metadata": item.metadata,
+                        "result": event_data,
+                    }
+                )
         except Exception as exc:
             logger.exception("[%s] ✗ processing failed", item.identifier)
             results.append(
