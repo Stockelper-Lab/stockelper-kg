@@ -13,7 +13,7 @@ from ..config import Config
 from ..graph import GraphBuilder, Neo4jClient
 from ..utils import measure_time
 from .dart import DartCollector
-from .kis import KISCollector
+from .kis import KISCollector, KISTokenManager
 from .krx import KRXCollector
 from .mongodb import MongoDBCollector
 
@@ -50,9 +50,12 @@ class StreamingOrchestrator:
         self.max_workers = max_workers
         self.env_path = env_path
 
+        self.kis_token_manager = KISTokenManager(config.kis, env_path)
+        self.kis_collector = KISCollector(
+            config.kis, config.sleep_seconds, env_path, token_manager=self.kis_token_manager
+        )
         # Initialize collectors (shared for sequential processing)
         self.krx_collector = KRXCollector(config.sleep_seconds)
-        self.kis_collector = KISCollector(config.kis, config.sleep_seconds, env_path)
         self.dart_collector = DartCollector(config.dart_api_key, config.sleep_seconds)
         self.mongodb_collector = MongoDBCollector(config.mongodb)
 
@@ -73,7 +76,10 @@ class StreamingOrchestrator:
         """
         if not hasattr(self._thread_local, "kis_collector"):
             self._thread_local.kis_collector = KISCollector(
-                self.config.kis, self.config.sleep_seconds, self.env_path
+                self.config.kis,
+                self.config.sleep_seconds,
+                self.env_path,
+                token_manager=self.kis_token_manager,
             )
         if not hasattr(self._thread_local, "dart_collector"):
             self._thread_local.dart_collector = DartCollector(

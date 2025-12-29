@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from neo4j.exceptions import ServiceUnavailable
 from tqdm import tqdm
 
 from .collectors import DataOrchestrator, StreamingOrchestrator
@@ -146,9 +147,14 @@ def main(
         for stock_code in tqdm(stock_codes, desc="Building graph"):
             builder.build_graph(graph_df, stock_code, date_list)
 
-    # Get final node count
-    client.get_node_count()
-    client.close()
+    try:
+        client.get_node_count()
+    except ServiceUnavailable as e:
+        logger.warning(
+            "Could not retrieve node count (database may be unavailable): %s", e
+        )
+    finally:
+        client.close()
 
     logger.info("Graph database build completed successfully!")
 

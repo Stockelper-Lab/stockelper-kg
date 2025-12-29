@@ -13,6 +13,7 @@ import pandas as pd
 from .client import Neo4jClient
 from .cypher import payload_to_cypher
 from .payload import build_competitor_payload, build_stock_snapshot_payload
+from .schema import GraphEdgeSpec, GraphNodeSpec, GraphPayload
 from ..utils.dates import normalize_date
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 class GraphBuilder:
     """Builds knowledge graph from collected data."""
+
+    SNAPSHOT_BATCH_SIZE: int = 30
 
     COMPANY_FIELDS: Tuple[str, ...] = (
         "stock_code",
@@ -43,6 +46,7 @@ class GraphBuilder:
         "stck_oprc",
         "stck_clpr",
         "stck_prpr",
+        "missing_price",
     )
     FINANCIAL_FIELDS: Tuple[str, ...] = (
         "stock_code",
@@ -98,6 +102,7 @@ class GraphBuilder:
         queries: List[str] = []
         normalized_date_series = filter_df["date"].apply(normalize_date)
 
+        payloads: List[GraphPayload] = []
         for date in normalized_dates:
             date_df = filter_df[normalized_date_series == date]
             if date_df.empty:
@@ -113,18 +118,28 @@ class GraphBuilder:
             stock_price["traded_at"] = date
             stock_price["date"] = date
             stock_price = self._align_price_fields(stock_price)
+            stock_price = self._fill_missing_price_defaults(stock_price)
 
             indicators = self._extract_indicators(snapshot_record, date)
             fs_snapshot = self._prepare_financial_snapshot(financials, date)
 
-            payload = build_stock_snapshot_payload(
-                company=company_props,
-                date=date,
-                stock_price=stock_price,
-                financials=fs_snapshot,
-                indicators=indicators,
+            payloads.append(
+                build_stock_snapshot_payload(
+                    company=company_props,
+                    date=date,
+                    stock_price=stock_price,
+                    financials=fs_snapshot,
+                    indicators=indicators,
+                )
             )
-            queries.append(payload_to_cypher(payload))
+
+        if not payloads:
+            return []
+
+        for start in range(0, len(payloads), self.SNAPSHOT_BATCH_SIZE):
+            batch = payloads[start : start + self.SNAPSHOT_BATCH_SIZE]
+            merged = self._merge_payloads(batch)
+            queries.append(payload_to_cypher(merged))
 
         return queries
 
@@ -212,6 +227,14 @@ class GraphBuilder:
             price["stck_clpr"] = present
         return price
 
+    def _fill_missing_price_defaults(self, price: Dict[str, Any]) -> Dict[str, Any]:
+        """Backfill placeholder price fields when data was missing at source."""
+        if not price.get("missing_price"):
+            return price
+        for key in ("stck_hgpr", "stck_lwpr", "stck_oprc", "stck_clpr", "stck_prpr"):
+            price.setdefault(key, 0)
+        return price
+
     def _normalise_value(self, value: Any) -> Any:
         """Normalise pandas/numpy-friendly values into JSON-safe scalars."""
         if value is None:
@@ -293,3 +316,29 @@ class GraphBuilder:
         if reported:
             snapshot["reported_date"] = reported
         return snapshot
+
+    def _merge_payloads(self, payloads: List[GraphPayload]) -> GraphPayload:
+        nodes: Dict[str, GraphNodeSpec] = {}
+        edge_keys: set[tuple[str, str, str]] = set()
+        edges: list[GraphEdgeSpec] = []
+
+        for payload in payloads:
+            for node in payload.nodes:
+                existing = nodes.get(node.key)
+                if not existing:
+                    nodes[node.key] = node
+                    continue
+                merged_props = {**existing.properties, **node.properties}
+                identity = existing.identity_keys or node.identity_keys
+                nodes[node.key] = GraphNodeSpec(
+                    node.label, node.key, merged_props, identity
+                )
+
+            for edge in payload.edges:
+                key = (edge.type, edge.source, edge.target)
+                if key in edge_keys:
+                    continue
+                edge_keys.add(key)
+                edges.append(edge)
+
+        return GraphPayload(nodes=tuple(nodes.values()), edges=tuple(edges))
