@@ -1,0 +1,157 @@
+{
+  "name": "AI Sector Universe",
+  "description": "Investment candidate stocks in AI sector",
+  "last_updated": "2026-01-03",
+  "version": "1.0",
+  "stocks": [
+    {
+      "corp_code": "00126380",
+      "stock_code": "005930",
+      "corp_name": "삼성전자",
+      "sector": "AI Semiconductors",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00164779",
+      "stock_code": "000660",
+      "corp_name": "SK하이닉스",
+      "sector": "AI Semiconductors",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00266961",
+      "stock_code": "035420",
+      "corp_name": "네이버",
+      "sector": "AI Services",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00258801",
+      "stock_code": "035720",
+      "corp_name": "카카오",
+      "sector": "AI Services",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00126186",
+      "stock_code": "018260",
+      "corp_name": "삼성에스디에스",
+      "sector": "AI IT Services",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00159023",
+      "stock_code": "017670",
+      "corp_name": "SK텔레콤",
+      "sector": "AI Telecom",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00190321",
+      "stock_code": "030200",
+      "corp_name": "케이티",
+      "sector": "AI Telecom",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00401731",
+      "stock_code": "066570",
+      "corp_name": "LG전자",
+      "sector": "AI Devices",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00231363",
+      "stock_code": "032640",
+      "corp_name": "LG유플러스",
+      "sector": "AI Telecom",
+      "market_cap_tier": "large"
+    },
+    {
+      "corp_code": "00273420",
+      "stock_code": "047560",
+      "corp_name": "이스트소프트",
+      "sector": "AI Software",
+      "market_cap_tier": "mid"
+    },
+    {
+      "corp_code": "00351427",
+      "stock_code": "096250",
+      "corp_name": "와이즈넛",
+      "sector": "AI Software",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "00601988",
+      "stock_code": "402030",
+      "corp_name": "코난테크놀로지",
+      "sector": "AI Software",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "01297898",
+      "stock_code": "377480",
+      "corp_name": "마음AI",
+      "sector": "AI Software",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "01042085",
+      "stock_code": "205100",
+      "corp_name": "엑셈",
+      "sector": "AI Data/Infrastructure",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "01237434",
+      "stock_code": "300080",
+      "corp_name": "플리토",
+      "sector": "AI Data",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "01405451",
+      "stock_code": "347860",
+      "corp_name": "알체라",
+      "sector": "AI Vision",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "00361169",
+      "stock_code": "041460",
+      "corp_name": "한국전자인증",
+      "sector": "AI Security",
+      "market_cap_tier": "mid"
+    },
+    {
+      "corp_code": "01261644",
+      "stock_code": "277810",
+      "corp_name": "레인보우로보틱스",
+      "sector": "AI Robotics",
+      "market_cap_tier": "mid"
+    },
+    {
+      "corp_code": "00234227",
+      "stock_code": "056080",
+      "corp_name": "유진로봇",
+      "sector": "AI Robotics",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "01063990",
+      "stock_code": "215100",
+      "corp_name": "로보로보",
+      "sector": "AI Robotics",
+      "market_cap_tier": "small"
+    },
+    {
+      "corp_code": "00356802",
+      "stock_code": "060280",
+      "corp_name": "큐렉소",
+      "sector": "AI Robotics",
+      "market_cap_tier": "small"
+    }
+  ]
+}
+
+
