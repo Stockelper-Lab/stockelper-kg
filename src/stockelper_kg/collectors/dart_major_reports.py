@@ -7,20 +7,40 @@ Updated strategy (2026-01-03):
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 import re
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
+from xml.etree import ElementTree as ET
+from pathlib import Path
 
 import requests
 from sqlalchemy import Column, Date, DateTime, MetaData, String, Table, Text, create_engine
 from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.engine import Engine
 
 OPENDART_BASE_URL = "https://opendart.fss.or.kr/api"
+logger = logging.getLogger(__name__)
+
+# Default cache location for corpCode.zip (writable in Airflow container).
+DEFAULT_CORPCODE_CACHE_PATHS = (
+    os.getenv("OPENDART_CORPCODE_CACHE_PATH"),
+    "/opt/airflow/data/opendart_corpCode.zip",
+    "/tmp/opendart_corpCode.zip",
+)
+
+# How long to keep corpCode.zip cache (hours). If the file is newer than this, reuse it.
+DEFAULT_CORPCODE_CACHE_MAX_AGE_HOURS = float(os.getenv("OPENDART_CORPCODE_CACHE_MAX_AGE_HOURS", "168"))  # 7 days
+
+# corpCode.xml is critical; allow longer wait/retry than per-endpoint retries.
+DEFAULT_CORPCODE_MAX_RETRIES = int(os.getenv("OPENDART_CORPCODE_MAX_RETRIES", "30"))
 
 
 def _camel_to_snake(name: str) -> str:
@@ -89,45 +109,46 @@ class MajorReportType(Enum):
     CR_DECSN = ("crDecsn", "감자_결정", "증자감자")
 
     # 채권은행 관련 (2)
-    EX_BNK_MNG_PCBG = ("exBnkMngPcbg", "채권은행_관리절차_개시", "채권은행")
-    EX_BNK_MNG_PCSP = ("exBnkMngPcsp", "채권은행_관리절차_중단", "채권은행")
+    # NOTE: Official endpoint names follow OpenDART guide (DS005)
+    EX_BNK_MNG_PCBG = ("bnkMngtPcbg", "채권은행_관리절차_개시", "채권은행")
+    EX_BNK_MNG_PCSP = ("bnkMngtPcsp", "채권은행_관리절차_중단", "채권은행")
 
     # 소송 관련 (1)
-    LWST_ETC_PRPS = ("lwstEtcPrps", "소송등_제기", "소송")
+    LWST_ETC_PRPS = ("lwstLg", "소송등_제기", "소송")
 
     # 해외 상장 관련 (4)
-    OVSCS_MKT_LST_DECSN = ("ovscsMktLstDecsn", "해외증권시장_상장_결정", "해외상장")
-    OVSCS_MKT_DLST_DECSN = ("ovscsMktDlstDecsn", "해외증권시장_상장폐지_결정", "해외상장")
-    OVSCS_MKT_LST = ("ovscsMktLst", "해외증권시장_상장", "해외상장")
-    OVSCS_MKT_DLST = ("ovscsMktDlst", "해외증권시장_상장폐지", "해외상장")
+    OVSCS_MKT_LST_DECSN = ("ovLstDecsn", "해외증권시장_상장_결정", "해외상장")
+    OVSCS_MKT_DLST_DECSN = ("ovDlstDecsn", "해외증권시장_상장폐지_결정", "해외상장")
+    OVSCS_MKT_LST = ("ovLst", "해외증권시장_상장", "해외상장")
+    OVSCS_MKT_DLST = ("ovDlst", "해외증권시장_상장폐지", "해외상장")
 
     # 사채 발행 관련 (4)
     CVBD_IS_DECSN = ("cvbdIsDecsn", "전환사채권_발행결정", "사채발행")
     BDWT_IS_DECSN = ("bdwtIsDecsn", "신주인수권부사채권_발행결정", "사채발행")
     EXBD_IS_DECSN = ("exbdIsDecsn", "교환사채권_발행결정", "사채발행")
-    WOCCS_IS_DECSN = ("woccsIsDecsn", "상각형_조건부자본증권_발행결정", "사채발행")
+    WOCCS_IS_DECSN = ("wdCocobdIsDecsn", "상각형_조건부자본증권_발행결정", "사채발행")
 
     # 자기주식 관련 (4)
     TSSTK_AQ_DECSN = ("tsstkAqDecsn", "자기주식_취득_결정", "자기주식")
     TSSTK_DP_DECSN = ("tsstkDpDecsn", "자기주식_처분_결정", "자기주식")
-    TSSTK_AQ_TRC_CTR_DECSN = ("tsstkAqTrcCtrDecsn", "자기주식취득_신탁계약_체결_결정", "자기주식")
-    TSSTK_AQ_TRC_CTR_CC_DECSN = ("tsstkAqTrcCtrCcDecsn", "자기주식취득_신탁계약_해지_결정", "자기주식")
+    TSSTK_AQ_TRC_CTR_DECSN = ("tsstkAqTrctrCnsDecsn", "자기주식취득_신탁계약_체결_결정", "자기주식")
+    TSSTK_AQ_TRC_CTR_CC_DECSN = ("tsstkAqTrctrCcDecsn", "자기주식취득_신탁계약_해지_결정", "자기주식")
 
     # 영업양수도 관련 (2)
     BSN_INH_DECSN = ("bsnInhDecsn", "영업양수_결정", "영업양수도")
     BSN_TRF_DECSN = ("bsnTrfDecsn", "영업양도_결정", "영업양수도")
 
     # 자산양수도 관련 (2)
-    TG_AST_INH_DECSN = ("tgAstInhDecsn", "유형자산_양수_결정", "자산양수도")
-    TG_AST_TRF_DECSN = ("tgAstTrfDecsn", "유형자산_양도_결정", "자산양수도")
+    TG_AST_INH_DECSN = ("tgastInhDecsn", "유형자산_양수_결정", "자산양수도")
+    TG_AST_TRF_DECSN = ("tgastTrfDecsn", "유형자산_양도_결정", "자산양수도")
 
     # 타법인 주식 관련 (2)
-    OTCPR_STK_INH_DECSN = ("otcprStkInhDecsn", "타법인주식_양수결정", "타법인주식")
-    OTCPR_STK_TRF_DECSN = ("otcprStkTrfDecsn", "타법인주식_양도결정", "타법인주식")
+    OTCPR_STK_INH_DECSN = ("otcprStkInvscrInhDecsn", "타법인주식_양수결정", "타법인주식")
+    OTCPR_STK_TRF_DECSN = ("otcprStkInvscrTrfDecsn", "타법인주식_양도결정", "타법인주식")
 
     # 사채권 양수도 관련 (2)
-    STK_RTBD_INH_DECSN = ("stkRtbdInhDecsn", "주권관련_사채권_양수_결정", "사채권양수도")
-    STK_RTBD_TRF_DECSN = ("stkRtbdTrfDecsn", "주권관련_사채권_양도_결정", "사채권양수도")
+    STK_RTBD_INH_DECSN = ("stkrtbdInhDecsn", "주권관련_사채권_양수_결정", "사채권양수도")
+    STK_RTBD_TRF_DECSN = ("stkrtbdTrfDecsn", "주권관련_사채권_양도_결정", "사채권양수도")
 
     # 합병/분할 관련 (4)
     CMP_MG_DECSN = ("cmpMgDecsn", "회사합병_결정", "합병분할")
@@ -164,7 +185,8 @@ class DartMajorReportCollector:
         self,
         *,
         api_key: str,
-        postgres_conn_string: str,
+        postgres_conn_string: str | None = None,
+        engine: Engine | None = None,
         sleep_seconds: float = 0.2,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
@@ -174,11 +196,92 @@ class DartMajorReportCollector:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.session = requests.Session()
+        # OpenDART에서 "잘못된 URL(101)"로 응답하는 엔드포인트는 더 이상 지원되지 않는 것으로 보고
+        # 한 번 감지되면 이후 호출을 즉시 스킵하여 전체 수집이 중단되지 않도록 합니다.
+        self._unsupported_endpoints: set[str] = set()
 
         # Local PostgreSQL (not remote)
-        self.engine = create_engine(postgres_conn_string, pool_pre_ping=True)
+        #
+        # NOTE:
+        # - Airflow DAGs may pass a ready SQLAlchemy Engine via `engine=...`.
+        # - CLI / library usage typically provides a DSN via `postgres_conn_string=...`.
+        # Support BOTH for backward compatibility.
+        if engine is not None and postgres_conn_string:
+            raise ValueError("Provide either `engine` or `postgres_conn_string`, not both.")
+        if engine is None and not postgres_conn_string:
+            raise ValueError("Missing DB config: provide `engine` or `postgres_conn_string`.")
+
+        if engine is not None:
+            self.engine = engine
+        else:
+            self.engine = create_engine(str(postgres_conn_string), pool_pre_ping=True)
         self.metadata = MetaData()
         self._table_cache: dict[str, Table] = {}
+        self._all_listed_cache: list[UniverseStock] | None = None
+        self._corpcode_zip_cache_path: str | None = next(
+            (p for p in DEFAULT_CORPCODE_CACHE_PATHS if p),
+            None,
+        )
+
+    @staticmethod
+    def _parse_opendart_error_payload(payload: bytes) -> tuple[str | None, str | None]:
+        """Parse OpenDART error payload (JSON or XML), best-effort."""
+        raw = (payload or b"").strip()
+        if not raw:
+            return None, None
+
+        # JSON: {"status":"020","message":"..."}
+        if raw.startswith(b"{"):
+            try:
+                data = json.loads(raw.decode("utf-8", errors="replace"))
+                return str(data.get("status") or "") or None, str(data.get("message") or "") or None
+            except Exception:  # noqa: BLE001
+                return None, None
+
+        # XML: <result><status>020</status><message>...</message></result>
+        if raw.startswith(b"<"):
+            try:
+                root = ET.fromstring(raw)
+                status = (root.findtext(".//status") or "").strip() or None
+                message = (root.findtext(".//message") or "").strip() or None
+                return status, message
+            except Exception:  # noqa: BLE001
+                return None, None
+
+        return None, None
+
+    def _read_corpcode_zip(self, zip_bytes: bytes) -> list[UniverseStock]:
+        """Parse OpenDART corpCode.zip bytes into listed companies (corp_code+stock_code)."""
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            xml_name = next((name for name in zf.namelist() if name.lower().endswith(".xml")), None)
+            if not xml_name:
+                raise RuntimeError("corpCode.zip did not contain an XML file.")
+            xml_bytes = zf.read(xml_name)
+
+        try:
+            root = ET.fromstring(xml_bytes)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Failed to parse corpCode.xml from OpenDART.") from exc
+
+        out_by_stock: dict[str, UniverseStock] = {}
+        for el in root.findall(".//list"):
+            corp_code = (el.findtext("corp_code") or "").strip()
+            stock_code = (el.findtext("stock_code") or "").strip()
+            corp_name = (el.findtext("corp_name") or "").strip()
+
+            if not (corp_code.isdigit() and len(corp_code) == 8):
+                continue
+            if not (stock_code.isdigit() and len(stock_code) == 6):
+                continue
+            if not corp_name:
+                continue
+
+            out_by_stock.setdefault(
+                stock_code,
+                UniverseStock(corp_code=corp_code, stock_code=stock_code, corp_name=corp_name),
+            )
+
+        return list(out_by_stock.values())
 
     # ---------- Universe ----------
     @staticmethod
@@ -214,6 +317,95 @@ class DartMajorReportCollector:
                 )
             )
         return parsed
+
+    # ---------- Listed companies (corpCode.xml) ----------
+    def _load_all_listed_from_corp_code_xml(self) -> list[UniverseStock]:
+        """Return all listed companies from OpenDART corpCode.xml.
+
+        Notes:
+        - OpenDART provides a zipped XML containing corp_code/stock_code/corp_name for all corps.
+        - We treat "listed" as rows that have a valid 6-digit `stock_code`.
+        """
+        # 1) Prefer local cache if present (avoids rate-limit 020).
+        cache_path = self._corpcode_zip_cache_path
+        if cache_path:
+            p = Path(cache_path)
+            if p.exists() and zipfile.is_zipfile(str(p)):
+                try:
+                    # Cache TTL check (best-effort)
+                    age_hours = (time.time() - p.stat().st_mtime) / 3600.0
+                    if age_hours <= DEFAULT_CORPCODE_CACHE_MAX_AGE_HOURS:
+                        zip_bytes = p.read_bytes()
+                        return self._read_corpcode_zip(zip_bytes)
+                    logger.info(
+                        "corpCode cache is too old (age_hours=%.1f > %.1f), re-downloading.",
+                        age_hours,
+                        DEFAULT_CORPCODE_CACHE_MAX_AGE_HOURS,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to read cached corpCode zip (%s): %s", p, exc)
+
+        # 2) Download from OpenDART with basic retry/backoff.
+        url = f"{OPENDART_BASE_URL}/corpCode.xml"
+        params = {"crtfc_key": self.api_key}
+
+        last_status: str | None = None
+        last_message: str | None = None
+        last_exc: Exception | None = None
+
+        max_retries = max(self.max_retries, DEFAULT_CORPCODE_MAX_RETRIES)
+        for attempt in range(1, max_retries + 1):
+            try:
+                res = self.session.get(url, params=params, timeout=max(self.timeout_seconds, 60.0))
+                res.raise_for_status()
+
+                # Success path: must be a ZIP.
+                if zipfile.is_zipfile(io.BytesIO(res.content)):
+                    zip_bytes = res.content
+                    # Best-effort cache write for future runs.
+                    if cache_path:
+                        try:
+                            p = Path(cache_path)
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            p.write_bytes(zip_bytes)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to write corpCode cache (%s): %s", cache_path, exc)
+                    return self._read_corpcode_zip(zip_bytes)
+
+                # Non-zip response: parse OpenDART error payload (often XML with <status>020</status>)
+                status, message = self._parse_opendart_error_payload(res.content)
+                last_status, last_message = status, message
+
+                if status == "020":
+                    # rate limit: wait and retry
+                    wait = min(60 * attempt, 300)
+                    logger.warning(
+                        "OpenDART corpCode.xml rate-limited (020). Waiting %ss then retrying (%s/%s).",
+                        wait,
+                        attempt,
+                        max_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                snippet = res.content[:200].decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"OpenDART corpCode.xml did not return a zip: status={status!r} message={message!r} content_type={res.headers.get('Content-Type')!r} snippet={snippet!r}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                wait = min(2 ** (attempt - 1), 8)
+                time.sleep(wait)
+
+        raise RuntimeError(
+            f"OpenDART corpCode.xml failed after retries: status={last_status!r} message={last_message!r}"
+        ) from last_exc
+
+    def list_all_listed_companies(self) -> list[UniverseStock]:
+        """List all listed companies (corp_code+stock_code) from OpenDART corpCode.xml (cached per instance)."""
+        if self._all_listed_cache is None:
+            self._all_listed_cache = self._load_all_listed_from_corp_code_xml()
+        return list(self._all_listed_cache)
 
     # ---------- PostgreSQL ----------
     def _get_table(self, report_type: MajorReportType) -> Table:
@@ -257,6 +449,10 @@ class DartMajorReportCollector:
         start_date: str,
         end_date: str,
     ) -> list[dict[str, Any]]:
+        # 이미 지원 불가로 판정된 엔드포인트면 즉시 스킵
+        if report_type.endpoint in self._unsupported_endpoints:
+            return []
+
         url = f"{OPENDART_BASE_URL}/{report_type.endpoint}.json"
         params = {
             "crtfc_key": self.api_key,
@@ -279,8 +475,20 @@ class DartMajorReportCollector:
                     return items if isinstance(items, list) else []
                 if status == "013":  # no data
                     return []
+                if status == "101":  # invalid URL (unsupported endpoint)
+                    message = data.get("message")
+                    # 전사적으로 스킵 처리(같은 엔드포인트를 모든 회사에 대해 계속 호출하지 않도록)
+                    self._unsupported_endpoints.add(report_type.endpoint)
+                    # best-effort: 전체 파이프라인을 실패시키지 않음
+                    return []
                 if status == "020":  # rate limit
                     wait = 60
+                    logger.warning(
+                        "OpenDART rate-limited (020). endpoint=%s corp_code=%s wait=%ss",
+                        report_type.endpoint,
+                        corp_code,
+                        wait,
+                    )
                     time.sleep(wait)
                     continue
 
@@ -373,6 +581,31 @@ class DartMajorReportCollector:
             out[report_type.endpoint] = inserted
         return out
 
+    def collect_all_report_types_for_company_range(
+        self,
+        *,
+        stock: UniverseStock,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, int]:
+        """Collect all 36 types for a single company in an explicit date range.
+
+        Returns mapping: endpoint -> inserted_rows
+        """
+        start = _yyyymmdd(start_date)
+        end = _yyyymmdd(end_date)
+
+        out: dict[str, int] = {}
+        for report_type in MajorReportType:
+            inserted = self.collect_report_type(
+                stock=stock,
+                report_type=report_type,
+                start_date=start,
+                end_date=end,
+            )
+            out[report_type.endpoint] = inserted
+        return out
+
     def collect_universe(
         self,
         *,
@@ -387,6 +620,40 @@ class DartMajorReportCollector:
             results[stock.stock_code] = self.collect_all_report_types_for_company(
                 stock=stock,
                 lookback_days=lookback_days,
+                end_date=end_date,
+            )
+        return results
+
+    def collect_all_listed(
+        self,
+        *,
+        lookback_days: int = 30,
+        end_date: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Collect all 36 types for ALL listed companies (derived from corpCode.xml)."""
+        stocks = self.list_all_listed_companies()
+        results: dict[str, dict[str, int]] = {}
+        for stock in stocks:
+            results[stock.stock_code] = self.collect_all_report_types_for_company(
+                stock=stock,
+                lookback_days=lookback_days,
+                end_date=end_date,
+            )
+        return results
+
+    def collect_all_listed_range(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, dict[str, int]]:
+        """Collect all 36 types for ALL listed companies in a date range (backfill)."""
+        stocks = self.list_all_listed_companies()
+        results: dict[str, dict[str, int]] = {}
+        for stock in stocks:
+            results[stock.stock_code] = self.collect_all_report_types_for_company_range(
+                stock=stock,
+                start_date=start_date,
                 end_date=end_date,
             )
         return results

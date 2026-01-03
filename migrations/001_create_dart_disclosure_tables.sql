@@ -29,45 +29,45 @@ BEGIN
       ('cr_decsn', 'crDecsn', '증자감자'),
 
       -- 채권은행 (2)
-      ('ex_bnk_mng_pcbg', 'exBnkMngPcbg', '채권은행'),
-      ('ex_bnk_mng_pcsp', 'exBnkMngPcsp', '채권은행'),
+      ('bnk_mngt_pcbg', 'bnkMngtPcbg', '채권은행'),
+      ('bnk_mngt_pcsp', 'bnkMngtPcsp', '채권은행'),
 
       -- 소송 (1)
-      ('lwst_etc_prps', 'lwstEtcPrps', '소송'),
+      ('lwst_lg', 'lwstLg', '소송'),
 
       -- 해외상장 (4)
-      ('ovscs_mkt_lst_decsn', 'ovscsMktLstDecsn', '해외상장'),
-      ('ovscs_mkt_dlst_decsn', 'ovscsMktDlstDecsn', '해외상장'),
-      ('ovscs_mkt_lst', 'ovscsMktLst', '해외상장'),
-      ('ovscs_mkt_dlst', 'ovscsMktDlst', '해외상장'),
+      ('ov_lst_decsn', 'ovLstDecsn', '해외상장'),
+      ('ov_dlst_decsn', 'ovDlstDecsn', '해외상장'),
+      ('ov_lst', 'ovLst', '해외상장'),
+      ('ov_dlst', 'ovDlst', '해외상장'),
 
       -- 사채발행 (4)
       ('cvbd_is_decsn', 'cvbdIsDecsn', '사채발행'),
       ('bdwt_is_decsn', 'bdwtIsDecsn', '사채발행'),
       ('exbd_is_decsn', 'exbdIsDecsn', '사채발행'),
-      ('woccs_is_decsn', 'woccsIsDecsn', '사채발행'),
+      ('wd_cocobd_is_decsn', 'wdCocobdIsDecsn', '사채발행'),
 
       -- 자기주식 (4)
       ('tsstk_aq_decsn', 'tsstkAqDecsn', '자기주식'),
       ('tsstk_dp_decsn', 'tsstkDpDecsn', '자기주식'),
-      ('tsstk_aq_trc_ctr_decsn', 'tsstkAqTrcCtrDecsn', '자기주식'),
-      ('tsstk_aq_trc_ctr_cc_decsn', 'tsstkAqTrcCtrCcDecsn', '자기주식'),
+      ('tsstk_aq_trctr_cns_decsn', 'tsstkAqTrctrCnsDecsn', '자기주식'),
+      ('tsstk_aq_trctr_cc_decsn', 'tsstkAqTrctrCcDecsn', '자기주식'),
 
       -- 영업양수도 (2)
       ('bsn_inh_decsn', 'bsnInhDecsn', '영업양수도'),
       ('bsn_trf_decsn', 'bsnTrfDecsn', '영업양수도'),
 
       -- 자산양수도 (2)
-      ('tg_ast_inh_decsn', 'tgAstInhDecsn', '자산양수도'),
-      ('tg_ast_trf_decsn', 'tgAstTrfDecsn', '자산양수도'),
+      ('tgast_inh_decsn', 'tgastInhDecsn', '자산양수도'),
+      ('tgast_trf_decsn', 'tgastTrfDecsn', '자산양수도'),
 
       -- 타법인주식 (2)
-      ('otcpr_stk_inh_decsn', 'otcprStkInhDecsn', '타법인주식'),
-      ('otcpr_stk_trf_decsn', 'otcprStkTrfDecsn', '타법인주식'),
+      ('otcpr_stk_invscr_inh_decsn', 'otcprStkInvscrInhDecsn', '타법인주식'),
+      ('otcpr_stk_invscr_trf_decsn', 'otcprStkInvscrTrfDecsn', '타법인주식'),
 
       -- 사채권양수도 (2)
-      ('stk_rtbd_inh_decsn', 'stkRtbdInhDecsn', '사채권양수도'),
-      ('stk_rtbd_trf_decsn', 'stkRtbdTrfDecsn', '사채권양수도'),
+      ('stkrtbd_inh_decsn', 'stkrtbdInhDecsn', '사채권양수도'),
+      ('stkrtbd_trf_decsn', 'stkrtbdTrfDecsn', '사채권양수도'),
 
       -- 합병분할 (4)
       ('cmp_mg_decsn', 'cmpMgDecsn', '합병분할'),
