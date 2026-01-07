@@ -4,9 +4,11 @@ services:
     container_name: stockelper-neo4j
     environment:
       - NEO4J_AUTH=${NEO4J_AUTH}
-      - NEO4J_server_memory_pagecache_size=2G
-      - NEO4J_server_memory_heap_initial__size=2G
-      - NEO4J_server_memory_heap_max__size=4G
+      # NOTE: KG full rebuild (mass delete + re-load) can OOM with the default 4G heap.
+      # Tune these values based on dataset size and host RAM.
+      - NEO4J_server_memory_pagecache_size=16G
+      - NEO4J_server_memory_heap_initial__size=8G
+      - NEO4J_server_memory_heap_max__size=16G
     ports:
       - "21004:7474"   # HTTP
       - "21005:7687"   # Bolt

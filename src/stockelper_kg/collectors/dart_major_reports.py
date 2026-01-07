@@ -1,7 +1,8 @@
-"""DART 36 major report type collector (structured endpoints) -> Local PostgreSQL.
+"""DART major report type collector (structured endpoints) -> Local PostgreSQL.
 
 Updated strategy (2026-01-03):
-- Use 36 'major report' endpoints (structured JSON) instead of generic list/document parsing.
+- Use OpenDART 'major report' endpoints (structured JSON) instead of generic list/document parsing.
+- Default is 36 endpoints, but can be reduced via `report_types=...` or env vars.
 - Store to Local PostgreSQL (not remote AWS).
 """
 
@@ -22,7 +23,7 @@ from xml.etree import ElementTree as ET
 from pathlib import Path
 
 import requests
-from sqlalchemy import Column, Date, DateTime, MetaData, String, Table, Text, create_engine
+from sqlalchemy import Column, Date, DateTime, Index, MetaData, String, Table, Text, create_engine, text
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import Engine
 
@@ -41,6 +42,67 @@ DEFAULT_CORPCODE_CACHE_MAX_AGE_HOURS = float(os.getenv("OPENDART_CORPCODE_CACHE_
 
 # corpCode.xml is critical; allow longer wait/retry than per-endpoint retries.
 DEFAULT_CORPCODE_MAX_RETRIES = int(os.getenv("OPENDART_CORPCODE_MAX_RETRIES", "30"))
+DEFAULT_FAIL_FAST_ON_020 = os.getenv("OPENDART_FAIL_FAST_ON_020", "1").strip() not in ("0", "false", "False", "no", "NO")
+
+
+class OpenDartAllKeysRateLimited(RuntimeError):
+    """All provided OpenDART API keys are rate-limited (020)."""
+
+
+def _parse_api_keys(raw: str | None) -> list[str]:
+    """Parse api keys from env/variable.
+
+    Supported formats:
+    - JSON list: '["key1","key2"]'
+    - Comma / whitespace separated: 'key1,key2' or 'key1 key2'
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return []
+
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            data = json.loads(s)
+            if isinstance(data, list):
+                out = [str(x).strip() for x in data if str(x).strip()]
+                return [x for x in out if x]
+        except Exception:  # noqa: BLE001
+            pass
+
+    parts = re.split(r"[,\s]+", s)
+    return [p for p in (x.strip() for x in parts) if p]
+
+
+def _parse_report_type_endpoints(raw: Any | None) -> list[str]:
+    """Parse major report type endpoints from env/variable/args.
+
+    Supported formats:
+    - Python list (e.g., Airflow Variable JSON): ["piicDecsn", "crDecsn"]
+    - JSON list string: '["piicDecsn","crDecsn"]'
+    - Comma / whitespace separated: "piicDecsn,crDecsn" or "piicDecsn crDecsn"
+    """
+    if raw is None:
+        return []
+
+    if isinstance(raw, (list, tuple, set)):
+        out = [str(x).strip() for x in raw if str(x).strip()]
+        return [x for x in out if x]
+
+    s = str(raw or "").strip()
+    if not s:
+        return []
+
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            data = json.loads(s)
+            if isinstance(data, list):
+                out = [str(x).strip() for x in data if str(x).strip()]
+                return [x for x in out if x]
+        except Exception:  # noqa: BLE001
+            pass
+
+    parts = re.split(r"[,\s]+", s)
+    return [p for p in (x.strip() for x in parts) if p]
 
 
 def _camel_to_snake(name: str) -> str:
@@ -89,7 +151,7 @@ def _infer_rcept_dt(*, rcept_no: str, rcept_dt_raw: str | None) -> date:
 
 
 class MajorReportType(Enum):
-    """Major report endpoints (36 types).
+    """Major report endpoints (full set).
 
     Each value is (endpoint, korean_name, category).
     Source: docs/references/DART(modified events).md (민우, 2026-01-03)
@@ -179,19 +241,48 @@ class UniverseStock:
 
 
 class DartMajorReportCollector:
-    """Collect 36 major report types and store to Local PostgreSQL."""
+    """Collect major report types and store to Local PostgreSQL.
+
+    By default, collects all OpenDART major-report endpoints (full set).
+    You can restrict the set via:
+    - init arg: report_types=[...]
+    - env vars (preferred): DART_CURATED_MAJOR_REPORT_ENDPOINTS / DART_CURATED_MAJOR_REPORT_TYPES
+      - fallback: DART_MAJOR_REPORT_ENDPOINTS / DART_MAJOR_REPORT_TYPES
+    """
 
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
+        api_keys: list[str] | str | None = None,
         postgres_conn_string: str | None = None,
         engine: Engine | None = None,
         sleep_seconds: float = 0.2,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
+        report_types: list[str] | str | None = None,
     ):
-        self.api_key = api_key
+        if api_key is not None and api_keys is not None:
+            raise ValueError("Provide either `api_key` or `api_keys`, not both.")
+
+        keys: list[str]
+        if api_keys is not None:
+            if isinstance(api_keys, list):
+                keys = [str(x).strip() for x in api_keys if str(x).strip()]
+            else:
+                keys = _parse_api_keys(str(api_keys))
+        else:
+            keys = _parse_api_keys(str(api_key))
+
+        if not keys:
+            raise ValueError("Missing OpenDART API key(s): provide `api_key` or `api_keys`.")
+
+        # Backward compatibility: keep `api_key` as the first key, but internally rotate using `api_keys`.
+        self.api_keys = list(keys)
+        self.api_key = self.api_keys[0]
+        self._api_key_cursor = 0
+        self._api_key_exhausted: set[str] = set()
+
         self.sleep_seconds = sleep_seconds
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
@@ -222,6 +313,64 @@ class DartMajorReportCollector:
             (p for p in DEFAULT_CORPCODE_CACHE_PATHS if p),
             None,
         )
+        # Backfill progress tracking (idempotency / resume)
+        self._progress_table_name = (
+            os.getenv("DART_CURATED_PROGRESS_TABLE")
+            or os.getenv("DART_MAJOR_REPORT_PROGRESS_TABLE")
+            or "dart_major_reports_backfill_progress"
+        )
+        # Ensure bootstrap queries stay fast (best-effort index creation per table).
+        self._bootstrap_index_ensured: set[str] = set()
+
+        # Major report endpoints to collect.
+        # - Default: all types (full set; backward compatible).
+        # - Can be reduced via init arg `report_types=...` or env vars:
+        #   - DART_CURATED_MAJOR_REPORT_ENDPOINTS / DART_CURATED_MAJOR_REPORT_TYPES
+        #   - (fallback) DART_MAJOR_REPORT_ENDPOINTS / DART_MAJOR_REPORT_TYPES
+        self.major_report_types: list[MajorReportType] = self._resolve_report_types(report_types)
+
+    def _resolve_report_types(self, raw: list[str] | str | None) -> list[MajorReportType]:
+        """Resolve requested report types into MajorReportType list (order-preserving, de-duplicated)."""
+        requested_raw = raw
+        if requested_raw is None:
+            requested_raw = (
+                os.getenv("DART_CURATED_MAJOR_REPORT_ENDPOINTS")
+                or os.getenv("DART_CURATED_MAJOR_REPORT_TYPES")
+                or os.getenv("DART_MAJOR_REPORT_ENDPOINTS")
+                or os.getenv("DART_MAJOR_REPORT_TYPES")
+            )
+
+        requested = _parse_report_type_endpoints(requested_raw)
+        if not requested:
+            return list(MajorReportType)
+
+        by_endpoint = {rt.endpoint: rt for rt in MajorReportType}
+        by_name = {rt.name: rt for rt in MajorReportType}
+
+        resolved: list[MajorReportType] = []
+        seen_endpoints: set[str] = set()
+        unknown: list[str] = []
+
+        for t in requested:
+            key = str(t).strip()
+            if not key:
+                continue
+            rt = by_endpoint.get(key) or by_name.get(key)
+            if rt is None:
+                unknown.append(key)
+                continue
+            if rt.endpoint in seen_endpoints:
+                continue
+            seen_endpoints.add(rt.endpoint)
+            resolved.append(rt)
+
+        if unknown:
+            raise ValueError(
+                "Unknown major report type(s): "
+                f"{unknown}. Use OpenDART endpoint names like 'piicDecsn' or Enum names like 'PIIC_DECSN'."
+            )
+
+        return resolved
 
     @staticmethod
     def _parse_opendart_error_payload(payload: bytes) -> tuple[str | None, str | None]:
@@ -249,6 +398,36 @@ class DartMajorReportCollector:
                 return None, None
 
         return None, None
+
+    # ---------- OpenDART API key rotation ----------
+    def _has_available_api_key(self) -> bool:
+        return any(k not in self._api_key_exhausted for k in self.api_keys)
+
+    def _next_api_key(self) -> str:
+        """Return next available API key (round-robin), skipping exhausted keys."""
+        if len(self.api_keys) == 1:
+            return self.api_keys[0]
+
+        if not self._has_available_api_key():
+            raise OpenDartAllKeysRateLimited("OpenDART rate-limited (020): all api keys exhausted.")
+
+        n = len(self.api_keys)
+        for _ in range(n):
+            key = self.api_keys[self._api_key_cursor % n]
+            self._api_key_cursor = (self._api_key_cursor + 1) % n
+            if key not in self._api_key_exhausted:
+                return key
+
+        # Fallback (shouldn't happen)
+        for key in self.api_keys:
+            if key not in self._api_key_exhausted:
+                return key
+        raise OpenDartAllKeysRateLimited("OpenDART rate-limited (020): all api keys exhausted.")
+
+    def _mark_api_key_rate_limited(self, key: str) -> None:
+        """Mark a key as exhausted for the rest of this run (used when we see status=020)."""
+        if len(self.api_keys) > 1 and key:
+            self._api_key_exhausted.add(key)
 
     def _read_corpcode_zip(self, zip_bytes: bytes) -> list[UniverseStock]:
         """Parse OpenDART corpCode.zip bytes into listed companies (corp_code+stock_code)."""
@@ -347,7 +526,7 @@ class DartMajorReportCollector:
 
         # 2) Download from OpenDART with basic retry/backoff.
         url = f"{OPENDART_BASE_URL}/corpCode.xml"
-        params = {"crtfc_key": self.api_key}
+        # NOTE: API key is rotated per attempt if multiple keys are configured.
 
         last_status: str | None = None
         last_message: str | None = None
@@ -356,6 +535,8 @@ class DartMajorReportCollector:
         max_retries = max(self.max_retries, DEFAULT_CORPCODE_MAX_RETRIES)
         for attempt in range(1, max_retries + 1):
             try:
+                api_key = self._next_api_key()
+                params = {"crtfc_key": api_key}
                 res = self.session.get(url, params=params, timeout=max(self.timeout_seconds, 60.0))
                 res.raise_for_status()
 
@@ -377,7 +558,25 @@ class DartMajorReportCollector:
                 last_status, last_message = status, message
 
                 if status == "020":
-                    # rate limit: wait and retry
+                    # rate limit: typically per-day per-key. If multiple keys exist, rotate immediately.
+                    if len(self.api_keys) > 1:
+                        self._mark_api_key_rate_limited(api_key)
+                        if self._has_available_api_key():
+                            logger.warning(
+                                "OpenDART corpCode.xml rate-limited (020) for one key. Rotating key (exhausted=%s/%s).",
+                                len(self._api_key_exhausted),
+                                len(self.api_keys),
+                            )
+                            continue
+                        raise OpenDartAllKeysRateLimited(
+                            f"OpenDART corpCode.xml rate-limited (020): all api keys exhausted. message={message!r}"
+                        )
+
+                    # Single-key mode: keep existing behavior (fail-fast or wait/retry).
+                    if DEFAULT_FAIL_FAST_ON_020:
+                        raise OpenDartAllKeysRateLimited(
+                            f"OpenDART corpCode.xml rate-limited (020): message={message!r}"
+                        )
                     wait = min(60 * attempt, 300)
                     logger.warning(
                         "OpenDART corpCode.xml rate-limited (020). Waiting %ss then retrying (%s/%s).",
@@ -392,6 +591,8 @@ class DartMajorReportCollector:
                 raise RuntimeError(
                     f"OpenDART corpCode.xml did not return a zip: status={status!r} message={message!r} content_type={res.headers.get('Content-Type')!r} snippet={snippet!r}"
                 )
+            except OpenDartAllKeysRateLimited:
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 wait = min(2 ** (attempt - 1), 8)
@@ -406,6 +607,384 @@ class DartMajorReportCollector:
         if self._all_listed_cache is None:
             self._all_listed_cache = self._load_all_listed_from_corp_code_xml()
         return list(self._all_listed_cache)
+
+    # ---------- Backfill progress (PostgreSQL) ----------
+    def _ensure_progress_table(self, table_name: str) -> None:
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS "{table_name}" (
+          stock_code VARCHAR(6) NOT NULL,
+          corp_code VARCHAR(8),
+          corp_name TEXT,
+          endpoint TEXT NOT NULL,
+          start_date DATE NOT NULL,
+          end_date DATE NOT NULL,
+          status TEXT NOT NULL,
+          inserted_rows INTEGER,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (stock_code, endpoint, start_date, end_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_status ON "{table_name}" (status);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_stock ON "{table_name}" (stock_code);
+        """
+        with self.engine.begin() as conn:
+            for stmt in ddl.strip().split(";"):
+                s = stmt.strip()
+                if s:
+                    conn.execute(text(s))
+
+    def _progress_done_set(self, *, table_name: str, start_date: str, end_date: str) -> set[tuple[str, str]]:
+        """Return set of (stock_code, endpoint) that are marked done for the given range."""
+        self._ensure_progress_table(table_name)
+        start_dt = _parse_rcept_dt(start_date)
+        end_dt = _parse_rcept_dt(end_date)
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT stock_code, endpoint
+                    FROM "{table_name}"
+                    WHERE start_date = :start_dt
+                      AND end_date = :end_dt
+                      AND status LIKE 'done%'
+                    """
+                ),
+                {"start_dt": start_dt, "end_dt": end_dt},
+            ).fetchall()
+        return {(str(r[0]), str(r[1])) for r in rows}
+
+    def _mark_progress_done(
+        self,
+        *,
+        table_name: str,
+        stock: UniverseStock,
+        endpoint: str,
+        start_date: str,
+        end_date: str,
+        inserted_rows: int | None,
+        status: str = "done",
+    ) -> None:
+        self._ensure_progress_table(table_name)
+        start_dt = _parse_rcept_dt(start_date)
+        end_dt = _parse_rcept_dt(end_date)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{table_name}" (
+                      stock_code, corp_code, corp_name, endpoint,
+                      start_date, end_date, status, inserted_rows, updated_at
+                    )
+                    VALUES (
+                      :stock_code, :corp_code, :corp_name, :endpoint,
+                      :start_date, :end_date, :status, :inserted_rows, NOW()
+                    )
+                    ON CONFLICT (stock_code, endpoint, start_date, end_date)
+                    DO UPDATE SET
+                      corp_code = EXCLUDED.corp_code,
+                      corp_name = EXCLUDED.corp_name,
+                      status = EXCLUDED.status,
+                      inserted_rows = EXCLUDED.inserted_rows,
+                      updated_at = NOW()
+                    """
+                ),
+                {
+                    "stock_code": stock.stock_code,
+                    "corp_code": stock.corp_code,
+                    "corp_name": stock.corp_name,
+                    "endpoint": str(endpoint),
+                    "start_date": start_dt,
+                    "end_date": end_dt,
+                    "status": str(status),
+                    "inserted_rows": int(inserted_rows) if inserted_rows is not None else None,
+                },
+            )
+
+    def _has_any_rows_for_stock_in_table(
+        self,
+        *,
+        table_name: str,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> bool:
+        """Best-effort bootstrap: if table has any row for stock_code in range, treat as already collected."""
+        start_dt = _parse_rcept_dt(start_date)
+        end_dt = _parse_rcept_dt(end_date)
+        with self.engine.begin() as conn:
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT EXISTS(
+                      SELECT 1
+                      FROM information_schema.tables
+                      WHERE table_schema='public' AND table_name = :t
+                    )
+                    """
+                ),
+                {"t": table_name},
+            ).scalar()
+            if not exists:
+                return False
+
+            # Best-effort: create supporting indexes once per table to keep the bootstrap check cheap.
+            if table_name not in self._bootstrap_index_ensured:
+                try:
+                    conn.execute(
+                        text(
+                            f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_stock_dt" ON "{table_name}" (stock_code, rcept_dt);'
+                        )
+                    )
+                    conn.execute(
+                        text(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_dt" ON "{table_name}" (rcept_dt);')
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                self._bootstrap_index_ensured.add(table_name)
+
+            hit = conn.execute(
+                text(
+                    f"""
+                    SELECT 1
+                    FROM "{table_name}"
+                    WHERE stock_code = :stock_code
+                      AND rcept_dt >= :start_dt
+                      AND rcept_dt <= :end_dt
+                    LIMIT 1
+                    """
+                ),
+                {"stock_code": str(stock_code), "start_dt": start_dt, "end_dt": end_dt},
+            ).fetchone()
+        return hit is not None
+
+    @staticmethod
+    def _load_priority_stock_codes(priority_universe_path: str) -> list[str]:
+        """Load priority stock codes from the Airflow universe JSON (list-of-dicts) or stockelper-kg universe (dict)."""
+        with open(priority_universe_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        codes: list[str] = []
+        if isinstance(data, list):
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                sc = str(row.get("stock_code") or "").strip()
+                if sc:
+                    sc = sc.zfill(6)
+                    if sc.isdigit() and len(sc) == 6:
+                        codes.append(sc)
+            return codes
+
+        if isinstance(data, dict):
+            stocks = data.get("stocks") or []
+            if isinstance(stocks, list):
+                for row in stocks:
+                    if not isinstance(row, dict):
+                        continue
+                    sc = str(row.get("stock_code") or "").strip()
+                    if sc:
+                        sc = sc.zfill(6)
+                        if sc.isdigit() and len(sc) == 6:
+                            codes.append(sc)
+            return codes
+
+        return codes
+
+    def collect_backfill_chunk(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        chunk_size: int = 500,
+        priority_universe_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Backfill up to `chunk_size` companies per run.
+
+        Order:
+        1) Priority universe (stock codes in JSON) first
+        2) Then other listed companies
+
+        Idempotency / resume:
+        - Uses a progress table in Postgres to skip already-processed (stock_code, endpoint, range).
+        - Bootstraps progress as 'done_bootstrap' if DB already contains rows for that (stock_code, endpoint, range).
+        """
+        start_s = _yyyymmdd(start_date)
+        end_s = _yyyymmdd(end_date)
+        if int(chunk_size) <= 0:
+            raise ValueError(f"chunk_size must be positive: {chunk_size!r}")
+
+        progress_table = self._progress_table_name
+        done = self._progress_done_set(table_name=progress_table, start_date=start_s, end_date=end_s)
+
+        # Load listed companies (corpCode cache strongly recommended)
+        try:
+            all_listed = self.list_all_listed_companies()
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "020" in msg or "rate-limit" in msg or "rate limited" in msg or "사용한도" in msg or "요청 제한" in msg:
+                logger.warning("Stopping chunk early: failed to load corpCode due to rate limit (020): %s", exc)
+                return {
+                    "start_date": start_s,
+                    "end_date": end_s,
+                    "chunk_size": int(chunk_size),
+                    "processed_stock_codes": [],
+                    "processed_count": 0,
+                    "inserted_total": 0,
+                    "per_company": {},
+                    "stopped_reason": "rate_limit_020_corpcode",
+                }
+            raise
+        all_by_code = {s.stock_code: s for s in all_listed}
+
+        # Priority list from JSON (Airflow universe file format)
+        priority_codes: list[str] = []
+        if priority_universe_path:
+            try:
+                priority_codes = self._load_priority_stock_codes(priority_universe_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load priority universe (%s): %s", priority_universe_path, exc)
+                priority_codes = []
+
+        seen: set[str] = set()
+        priority_stocks: list[UniverseStock] = []
+        for code in priority_codes:
+            if code in seen:
+                continue
+            st = all_by_code.get(code)
+            if st is None:
+                continue
+            priority_stocks.append(st)
+            seen.add(code)
+
+        # Remaining stocks (sorted for deterministic resume)
+        remaining_stocks = [s for s in sorted(all_listed, key=lambda x: x.stock_code) if s.stock_code not in seen]
+
+        def _stock_is_complete(stock_code: str) -> bool:
+            # Complete means we have done markers for all endpoints.
+            needed = len(self.major_report_types)
+            cnt = 0
+            for rt in self.major_report_types:
+                if (stock_code, rt.endpoint) in done:
+                    cnt += 1
+            return cnt >= needed
+
+        # Select next chunk of incomplete companies
+        targets: list[UniverseStock] = []
+        for s in priority_stocks:
+            if len(targets) >= int(chunk_size):
+                break
+            if not _stock_is_complete(s.stock_code):
+                targets.append(s)
+
+        if len(targets) < int(chunk_size):
+            for s in remaining_stocks:
+                if len(targets) >= int(chunk_size):
+                    break
+                if not _stock_is_complete(s.stock_code):
+                    targets.append(s)
+
+        logger.info(
+            "Backfill chunk selected: targets=%s chunk_size=%s priority=%s total_listed=%s",
+            len(targets),
+            int(chunk_size),
+            len(priority_stocks),
+            len(all_listed),
+        )
+
+        processed: list[str] = []
+        inserted_total = 0
+        per_company: dict[str, dict[str, int]] = {}
+
+        for stock in targets:
+            processed.append(stock.stock_code)
+            per_company[stock.stock_code] = {}
+
+            for rt in self.major_report_types:
+                key = (stock.stock_code, rt.endpoint)
+                if key in done:
+                    continue
+
+                # Bootstrap: if data already exists for this stock+endpoint+range, mark done and skip API call.
+                dart_table = f"dart_{_camel_to_snake(rt.endpoint)}"
+                try:
+                    if self._has_any_rows_for_stock_in_table(
+                        table_name=dart_table,
+                        stock_code=stock.stock_code,
+                        start_date=start_s,
+                        end_date=end_s,
+                    ):
+                        self._mark_progress_done(
+                            table_name=progress_table,
+                            stock=stock,
+                            endpoint=rt.endpoint,
+                            start_date=start_s,
+                            end_date=end_s,
+                            inserted_rows=None,
+                            status="done_bootstrap",
+                        )
+                        done.add(key)
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Bootstrap check failed: stock=%s endpoint=%s err=%s", stock.stock_code, rt.endpoint, exc)
+
+                # Call API + insert
+                try:
+                    inserted = self.collect_report_type(
+                        stock=stock,
+                        report_type=rt,
+                        start_date=start_s,
+                        end_date=end_s,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    msg = str(exc)
+                    if (
+                        "status=020" in msg
+                        or "(020)" in msg
+                        or "rate-limited" in msg
+                        or "rate limited" in msg
+                        or "사용한도" in msg
+                        or "요청 제한" in msg
+                    ):
+                        # Stop gracefully; next scheduled run (24h later) should resume from progress.
+                        logger.warning("Stopping chunk early due to rate limit (020). stock=%s endpoint=%s", stock.stock_code, rt.endpoint)
+                        return {
+                            "start_date": start_s,
+                            "end_date": end_s,
+                            "chunk_size": int(chunk_size),
+                            "processed_stock_codes": processed,
+                            "processed_count": len(processed),
+                            "inserted_total": inserted_total,
+                            "per_company": per_company,
+                            "stopped_reason": "rate_limit_020",
+                        }
+                    # Non-rate-limit error: leave it for retry in future runs
+                    logger.warning("Collect failed: stock=%s endpoint=%s err=%s", stock.stock_code, rt.endpoint, exc)
+                    continue
+
+                per_company[stock.stock_code][rt.endpoint] = int(inserted or 0)
+                inserted_total += int(inserted or 0)
+
+                # Mark progress as done even if inserted==0 (means called successfully but no data)
+                self._mark_progress_done(
+                    table_name=progress_table,
+                    stock=stock,
+                    endpoint=rt.endpoint,
+                    start_date=start_s,
+                    end_date=end_s,
+                    inserted_rows=int(inserted or 0),
+                    status="done",
+                )
+                done.add(key)
+
+        return {
+            "start_date": start_s,
+            "end_date": end_s,
+            "chunk_size": int(chunk_size),
+            "processed_stock_codes": processed,
+            "processed_count": len(processed),
+            "inserted_total": inserted_total,
+            "per_company": per_company,
+            "stopped_reason": None,
+        }
 
     # ---------- PostgreSQL ----------
     def _get_table(self, report_type: MajorReportType) -> Table:
@@ -429,6 +1008,15 @@ class DartMajorReportCollector:
         )
         # Create minimal table if migration hasn't been applied yet.
         table.create(self.engine, checkfirst=True)
+        # Best-effort indexes for common lookups / bootstrap checks.
+        # (If the official migration ran, these already exist; IF NOT, create them here.)
+        Index(f"idx_{table_name}_corp_dt", table.c.corp_code, table.c.rcept_dt).create(
+            self.engine, checkfirst=True
+        )
+        Index(f"idx_{table_name}_stock_dt", table.c.stock_code, table.c.rcept_dt).create(
+            self.engine, checkfirst=True
+        )
+        Index(f"idx_{table_name}_dt", table.c.rcept_dt).create(self.engine, checkfirst=True)
         self._table_cache[table_key] = table
         return table
 
@@ -454,15 +1042,17 @@ class DartMajorReportCollector:
             return []
 
         url = f"{OPENDART_BASE_URL}/{report_type.endpoint}.json"
-        params = {
-            "crtfc_key": self.api_key,
+        base_params = {
             "corp_code": corp_code,
             "bgn_de": _yyyymmdd(start_date),
             "end_de": _yyyymmdd(end_date),
         }
 
         last_exc: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
+        attempt = 0
+        while attempt < self.max_retries:
+            api_key = self._next_api_key()
+            params = {"crtfc_key": api_key, **base_params}
             try:
                 time.sleep(self.sleep_seconds)
                 res = self.session.get(url, params=params, timeout=self.timeout_seconds)
@@ -482,6 +1072,27 @@ class DartMajorReportCollector:
                     # best-effort: 전체 파이프라인을 실패시키지 않음
                     return []
                 if status == "020":  # rate limit
+                    # If multiple keys exist, rotate immediately.
+                    if len(self.api_keys) > 1:
+                        self._mark_api_key_rate_limited(api_key)
+                        if self._has_available_api_key():
+                            logger.warning(
+                                "OpenDART rate-limited (020) for one key. Rotating key (exhausted=%s/%s). endpoint=%s corp_code=%s",
+                                len(self._api_key_exhausted),
+                                len(self.api_keys),
+                                report_type.endpoint,
+                                corp_code,
+                            )
+                            continue
+                        raise OpenDartAllKeysRateLimited(
+                            f"OpenDART rate-limited (020): all api keys exhausted. endpoint={report_type.endpoint} corp_code={corp_code}"
+                        )
+
+                    # Single-key mode: keep existing behavior (fail-fast or wait/retry).
+                    if DEFAULT_FAIL_FAST_ON_020:
+                        raise OpenDartAllKeysRateLimited(
+                            f"OpenDART rate-limited (020): endpoint={report_type.endpoint} corp_code={corp_code}"
+                        )
                     wait = 60
                     logger.warning(
                         "OpenDART rate-limited (020). endpoint=%s corp_code=%s wait=%ss",
@@ -490,14 +1101,18 @@ class DartMajorReportCollector:
                         wait,
                     )
                     time.sleep(wait)
+                    attempt += 1
                     continue
 
                 message = data.get("message")
                 raise RuntimeError(
                     f"OpenDART major report failed: endpoint={report_type.endpoint}, status={status}, message={message}"
                 )
+            except OpenDartAllKeysRateLimited:
+                raise
             except Exception as exc:  # noqa: BLE001 - controlled retries
                 last_exc = exc
+                attempt += 1
                 wait = min(2 ** (attempt - 1), 8)
                 time.sleep(wait)
 
@@ -561,7 +1176,7 @@ class DartMajorReportCollector:
         lookback_days: int = 30,
         end_date: str | None = None,
     ) -> dict[str, int]:
-        """Collect all 36 types for a single company (lookback window).
+        """Collect all configured types for a single company (lookback window).
 
         Returns mapping: endpoint -> inserted_rows
         """
@@ -571,7 +1186,7 @@ class DartMajorReportCollector:
         end = end_dt.strftime("%Y%m%d")
 
         out: dict[str, int] = {}
-        for report_type in MajorReportType:
+        for report_type in self.major_report_types:
             inserted = self.collect_report_type(
                 stock=stock,
                 report_type=report_type,
@@ -588,7 +1203,7 @@ class DartMajorReportCollector:
         start_date: str,
         end_date: str,
     ) -> dict[str, int]:
-        """Collect all 36 types for a single company in an explicit date range.
+        """Collect all configured types for a single company in an explicit date range.
 
         Returns mapping: endpoint -> inserted_rows
         """
@@ -596,7 +1211,7 @@ class DartMajorReportCollector:
         end = _yyyymmdd(end_date)
 
         out: dict[str, int] = {}
-        for report_type in MajorReportType:
+        for report_type in self.major_report_types:
             inserted = self.collect_report_type(
                 stock=stock,
                 report_type=report_type,
@@ -613,7 +1228,7 @@ class DartMajorReportCollector:
         lookback_days: int = 30,
         end_date: str | None = None,
     ) -> dict[str, dict[str, int]]:
-        """Collect all 36 types for all companies in the universe."""
+        """Collect all configured types for all companies in the universe."""
         stocks = self.load_universe(universe_path)
         results: dict[str, dict[str, int]] = {}
         for stock in stocks:
@@ -630,7 +1245,7 @@ class DartMajorReportCollector:
         lookback_days: int = 30,
         end_date: str | None = None,
     ) -> dict[str, dict[str, int]]:
-        """Collect all 36 types for ALL listed companies (derived from corpCode.xml)."""
+        """Collect all configured types for ALL listed companies (derived from corpCode.xml)."""
         stocks = self.list_all_listed_companies()
         results: dict[str, dict[str, int]] = {}
         for stock in stocks:
@@ -647,7 +1262,7 @@ class DartMajorReportCollector:
         start_date: str,
         end_date: str,
     ) -> dict[str, dict[str, int]]:
-        """Collect all 36 types for ALL listed companies in a date range (backfill)."""
+        """Collect all configured types for ALL listed companies in a date range (backfill)."""
         stocks = self.list_all_listed_companies()
         results: dict[str, dict[str, int]] = {}
         for stock in stocks:
@@ -668,10 +1283,11 @@ def main() -> int:
     - DART_UNIVERSE_JSON (optional) default: ./modules/dart_disclosure/universe.ai-sector.template.json
     - DART_LOOKBACK_DAYS (optional) default: 30
     """
-    api_key = os.getenv("OPEN_DART_API_KEY") or ""
+    api_keys_raw = os.getenv("OPEN_DART_API_KEYS") or os.getenv("OPEN_DART_API_KEY") or ""
     pg = os.getenv("LOCAL_POSTGRES_CONN_STRING") or ""
-    if not api_key or not pg:
-        raise SystemExit("Missing OPEN_DART_API_KEY or LOCAL_POSTGRES_CONN_STRING")
+    api_keys = _parse_api_keys(api_keys_raw)
+    if not api_keys or not pg:
+        raise SystemExit("Missing OPEN_DART_API_KEYS/OPEN_DART_API_KEY or LOCAL_POSTGRES_CONN_STRING")
 
     universe_path = os.getenv(
         "DART_UNIVERSE_JSON",
@@ -679,7 +1295,7 @@ def main() -> int:
     )
     lookback_days = int(os.getenv("DART_LOOKBACK_DAYS", "30"))
 
-    collector = DartMajorReportCollector(api_key=api_key, postgres_conn_string=pg)
+    collector = DartMajorReportCollector(api_keys=api_keys, postgres_conn_string=pg)
     collector.collect_universe(universe_path=universe_path, lookback_days=lookback_days)
     return 0
 

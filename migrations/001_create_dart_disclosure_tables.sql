@@ -1,7 +1,7 @@
--- DART 36 Major Report Type Collection - Local PostgreSQL schema
+-- DART Major Report Type Collection - Local PostgreSQL schema
 -- ------------------------------------------------------------
 -- Updated Strategy (2026-01-03):
--- - Collect 36 structured major-report endpoints (endpoint.json)
+-- - Collect structured major-report endpoints (endpoint.json) (full schema; runtime can be curated)
 -- - Store raw structured payload as JSONB (no LLM parsing at this stage)
 -- - Create one table per endpoint: dart_{snake_case(endpoint)}
 --
