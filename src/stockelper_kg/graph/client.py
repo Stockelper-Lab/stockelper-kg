@@ -11,10 +11,18 @@ logger = logging.getLogger(__name__)
 
 class Neo4jClient:
     def __init__(self, config: Neo4jConfig):
-        self.driver = GraphDatabase.driver(
-            config.uri, auth=(config.user, config.password)
-        )
-        logger.info(f"Connected to Neo4j at {config.uri}")
+        self.driver = GraphDatabase.driver(config.uri, auth=(config.user, config.password))
+        # NOTE: GraphDatabase.driver() is lazy; it doesn't connect until the first query.
+        # Verify connectivity here to avoid misleading "connected" logs.
+        try:
+            self.driver.verify_connectivity()
+        except Exception:
+            try:
+                self.driver.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        logger.info("Connected to Neo4j at %s", config.uri)
 
     def close(self):
         self.driver.close()
