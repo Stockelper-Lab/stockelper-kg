@@ -29,6 +29,7 @@ dependencies = [
 [project.scripts]
 stockelper-kg = "stockelper_kg.cli:cli"
 stockelper-kg-events = "stockelper_kg.event_cli:cli"
+stockelper-kg-mongo = "stockelper_kg.mongodb_cli:cli"
 
 [build-system]
 requires = ["hatchling"]

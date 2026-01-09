@@ -43,6 +43,12 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.execute_write(lambda tx: tx.run(query))
 
+    def execute_query_with_params(self, query: str, parameters: dict | None = None):
+        """Execute a Cypher query with parameters (write transaction)."""
+        with self.driver.session() as session:
+            params = parameters or {}
+            session.execute_write(lambda tx: tx.run(query, **params))
+
     def execute_queries(self, queries: list[str]):
         if not queries:
             return
